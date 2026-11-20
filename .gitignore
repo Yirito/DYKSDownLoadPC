@@ -1,0 +1,16 @@
+# 本地浏览器 profile（登录态/Cookie，绝不能提交）
+profiles/
+*.png
+# 运行时
+secret.txt
+data/
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+# 杂项
+*.log
+.DS_Store
+.idea/
+.vscode/
