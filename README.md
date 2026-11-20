@@ -18,6 +18,21 @@
 
 ## 🖥 可视化界面（推荐）
 
+### 一键启动（Windows）
+
+```
+C:\Users\49059\Desktop\抖音快手批量下载.bat
+```
+
+双击就开终端跑起来，浏览器自动打开 `http://127.0.0.1:8790/`。
+
+> ⚠️ **bat 文件必须是纯 ASCII**（或写成系统 ANSI 代码页 GBK）。
+> 存成 UTF-8 的话，cmd 按 GBK 读 → 满屏乱码 + 命令被拆坏
+> （本机 cmd 是 UTF-8 模式，存 GBK 同样乱码 → **纯 ASCII 最保险**）。
+> 中文提示交给 Python 输出（bat 里 `chcp 65001` + `PYTHONIOENCODING=utf-8`）。
+
+### 手动启动
+
 ```bash
 git clone git@github.com:Yirito/DYKSDownLoadPC.git
 cd DYKSDownLoadPC
@@ -26,6 +41,10 @@ python -m playwright install chromium     # 装 Chromium（必须）
 
 python webui.py          # 自动打开浏览器 → http://127.0.0.1:8790
 ```
+
+> 端口被占用时会明确报错退出（曾经有残留进程占着端口，
+> 导致「改了代码不生效」）。换个端口：`python webui.py --port 8791`。
+> 本项目默认 **8790**（避开「一键签到」8765、「workbench回测」8000）。
 
 界面里能做的事：
 
