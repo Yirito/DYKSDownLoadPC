@@ -172,25 +172,59 @@ function saveConfig() {
 }
 
 /* ---------- 登录状态 + 手动登录 ---------- */
+/* 正在处理登录的平台（点「登录」后到就绪为止，一直显示「处理中…」） */
+var pendingPlat = null;
+
 function loadStatus(force) {
   fetch('/api/status' + (force ? '?force=1' : '')).then(r=>r.json()).then(function(j){
     $('status').innerHTML = (j.items||[]).map(function(it){
       var cls = it.ok ? 'ok' : (it.local ? 'warn' : 'bad');
       var txt = it.ok ? '✅ 可用' : (it.local ? '⚠ 已失效' : '❌ 未就绪');
-      var btn = it.ok ? '' :
-        '<button class="btn ' + (it.local ? 'ghost' : '') + '" data-plat="' + it.plat + '">登录</button>';
+      var btn = '';
+      if (!it.ok) {
+        if (pendingPlat === it.plat) {
+          btn = '<button class="btn" disabled>处理中…</button>';
+        } else {
+          btn = '<button class="btn ' + (it.local ? 'ghost' : '') +
+                '" data-plat="' + it.plat + '">登录</button>';
+        }
+      }
       return '<span class="st ' + cls + '">' + esc(it.name) + ' ' + txt +
              '<span style="opacity:.8">' + esc(it.why||'') + '</span>' + btn + '</span>';
     }).join('') || '<span class="st">检测中…</span>';
   }).catch(function(){});
 }
+
 $('status').addEventListener('click', function(e){
   var b = e.target.closest('button[data-plat]');
   if (!b) return;
+  var plat = b.getAttribute('data-plat');
+  pendingPlat = plat;
   b.disabled = true; b.textContent = '打开中…';
+  loadStatus(true);
   fetch('/api/prepare', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({plat: b.getAttribute('data-plat')})})
-    .then(function(){ setTimeout(function(){ loadStatus(true); }, 4000); });
+    body: JSON.stringify({plat: plat})})
+    .then(function(){
+      /* ★ 每 2 秒探一次，一检测到就绪立刻刷新显示
+         （不用等 15 秒的常规轮询） */
+      var n = 0;
+      var iv = setInterval(function(){
+        n++;
+        loadStatus(true);
+        var still = document.querySelector('#status button[data-plat="' + plat + '"]');
+        if (!still) {                 // 按钮消失 = 已就绪
+          clearInterval(iv);
+          pendingPlat = null;
+          loadStatus(true);
+          return;
+        }
+        if (n > 120) {                // 4 分钟还没成，放弃等待
+          clearInterval(iv);
+          pendingPlat = null;
+          loadStatus(true);
+        }
+      }, 2000);
+    });
 });
 
 /* ---------- 进度 / 日志 ---------- */

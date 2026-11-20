@@ -245,19 +245,10 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
 
     idx = 0
     for plat in plats:
-        # ⚠️ 这里本身就在事件循环里，必须直接 await，不能用 asyncio.run()
-        try:
-            ok, why = await auth.check_auth(plat)
-        except Exception as e:
-            ok, why = False, f"探测异常：{str(e)[:80]}"
-        if not ok:
-            logline(f"{PLAT_NAME[plat]} 未就绪（{why}）→ 跳过。"
-                    f"请在「登录 / 验证状态」里点该平台的「登录」按钮处理后再下载。", "warn")
-            set_item(idx, plat=plat, name=f"（{PLAT_NAME[plat]}未就绪：{why}）",
-                     state="need_auth", pct=0, size=0, wh="")
-            idx += 1
-            continue
-
+        # ★ 不再【预先探测登录态】—— 预检查会误判（探测口径和搜索口径不一致，
+        #   于是出现「状态栏说可用、下载却提示待登录」）。
+        #   直接开搜：搜索接口自己会告诉我们要不要登录/验证（AuthExpired），
+        #   搜得到就是搜得到，搜不到就如实说「没搜到结果」。
         with _lock:
             JOB["phase"] = f"搜索 {PLAT_NAME[plat]}"
         logline(f"正在搜索 {PLAT_NAME[plat]}：{keyword}")
@@ -421,7 +412,9 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     asyncio.run(auth.prepare(plat))
                 finally:
-                    refresh_status_async()
+                    # ★ 登录/验证刚完成 → 立刻重探一次并写进缓存，
+                    #   否则前端要等缓存过期（90s）才看到「已就绪」
+                    _refresh_status_worker()
 
             threading.Thread(target=_do, daemon=True).start()
             self._json({"ok": True})

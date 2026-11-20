@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from pathlib import Path
 from urllib.parse import quote
@@ -358,7 +359,20 @@ async def _open_ctx(pw, plat: str, prof: str, headless: bool):
         viewport={"width": 1440, "height": 900}, locale="zh-CN", user_agent=UA_DESKTOP)
 
 
-async def check_auth_in_browser(plat: str) -> tuple[bool, str]:
+# 浏览器探测的串行锁 + 短缓存
+# ★ 为什么必须串行：两个浏览器同时开同一个 profile → 后启动的那个
+#   因 profile 被占用而失败 → 状态栏和下载判定各开一个就会撞，
+#   表现为「状态栏说可用、下载却提示待登录」。
+# ★ 为什么还要缓存：状态栏刷新、下载前判定、prepare 三处都要查，
+#   每次都开浏览器太慢；30 秒内共用同一份结果，三处结论必然一致。
+# ★ 必须是 RLock（可重入）：下面在已持有锁的情况下还会 `with _probe_lock:`
+#   读写缓存 —— 用普通 Lock 会自死锁（探测永远卡住，Chrome 进程堆积）。
+_probe_lock = threading.RLock()
+_probe_cache: dict = {}
+PROBE_CACHE_TTL = 30.0
+
+
+async def check_auth_in_browser(plat: str, use_cache: bool = True) -> tuple[bool, str]:
     """用【浏览器里的真实 cookie】检查登录/验证状态。
 
     ★ 为什么必须走浏览器：Chrome 在磁盘上把 cookie【值】加密了，
@@ -366,25 +380,51 @@ async def check_auth_in_browser(plat: str) -> tuple[bool, str]:
       状态栏就会误报「未就绪」（实测登录了也报没登录）。
       浏览器能自动解密，拿到的是真实会话。
     """
-    from playwright.async_api import async_playwright
-    prof = _pick_profile("dy" if plat == "douyin" else "ks")
-    async with async_playwright() as pw:
-        ctx = await _open_ctx(pw, plat, prof, headless=True)
-        try:
-            page = await ctx.new_page()
-            await page.goto(_home_url(plat), wait_until="domcontentloaded", timeout=45000)
-            await page.wait_for_timeout(4000)
-            ck = {c["name"]: c["value"] for c in await ctx.cookies()}
-            header = "; ".join(f"{k}={v}" for k, v in ck.items() if v)
-            return await check_auth(plat, cookie_header=header)
-        except Exception as e:
-            return False, f"浏览器探测异常：{str(e)[:80]}"
-        finally:
+    if use_cache:
+        with _probe_lock:
+            hit = _probe_cache.get(plat)
+        if hit and (time.time() - hit[0]) < PROBE_CACHE_TTL:
+            return hit[1], hit[2]
+    # ★ 用 acquire(timeout=) 而不是 `with` —— 后者在协程里会阻塞事件循环线程，
+    #   多个线程各带自己的事件循环时会死锁。
+    if not _probe_lock.acquire(timeout=90):
+        return False, "另一个检测还在跑，请稍候再试"
+    try:
+        from playwright.async_api import async_playwright
+        prof = _pick_profile("dy" if plat == "douyin" else "ks")
+        async with async_playwright() as pw:
+            ctx = await _open_ctx(pw, plat, prof, headless=True)
             try:
-                await ctx.close()
-            except Exception:
-                pass
-            _release_profile(prof)
+                page = await ctx.new_page()
+                await page.goto(_home_url(plat), wait_until="domcontentloaded",
+                                timeout=45000)
+                await page.wait_for_timeout(4000)
+                ck = {c["name"]: c["value"] for c in await ctx.cookies()}
+                header = "; ".join(f"{k}={v}" for k, v in ck.items() if v)
+                ok, why = await check_auth(plat, cookie_header=header)
+                with _probe_lock:
+                    _probe_cache[plat] = (time.time(), ok, why)
+                return ok, why
+            except Exception as e:
+                # ★ 探测失败（比如别的浏览器正占着 profile）时，
+                #   宁可给一个【旧的结论】，也不要误报成「未就绪」
+                with _probe_lock:
+                    old = _probe_cache.get(plat)
+                if old:
+                    return old[1], old[2]
+                msg = str(e)
+                if "user data directory is already in use" in msg or                         "ProcessSingleton" in msg or "SingletonLock" in msg:
+                    return False, ("profile 被占用：还有残留的浏览器进程没关"
+                                   "（任务管理器里结束 chrome.exe 再试）")
+                return False, f"浏览器探测异常：{msg[:80]}"
+            finally:
+                try:
+                    await ctx.close()
+                except Exception:
+                    pass
+                _release_profile(prof)
+    finally:
+        _probe_lock.release()
 
 
 async def prepare(plat: str, timeout: int = 300, keyword: str = "测试") -> bool:
