@@ -447,19 +447,26 @@ def main():
         allow_reuse_address = True
 
     Handler.timeout = 30          # 单连接最长存活 30 秒
-    # ★ 端口被占用时【直接报错退出】，不要闷头起一个连不上的服务
-    #   （曾因为残留进程占着端口，导致改了代码也不生效、状态显示还是旧的）
+    # ★ 端口被占用时【自动往后顺延】（最多试 10 个），而不是报错退出。
+    #   残留进程占着端口太常见，让人自己换端口是折腾；
+    #   实际用的端口会打印出来，浏览器也自动打开它。
     import socket
-    _probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        _probe.settimeout(1)
-        if _probe.connect_ex((args.host, args.port)) == 0:
-            print(f"\n❌ 端口 {args.port} 已被占用！")
-            print(f"   可能上一次的进程还没退。先关掉那个黑窗口，")
-            print(f"   或者换个端口：python webui.py --port 8791")
-            sys.exit(1)
-    finally:
-        _probe.close()
+    port = args.port
+    for _ in range(10):
+        _probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            _probe.settimeout(1)
+            busy = _probe.connect_ex((args.host, port)) == 0
+        finally:
+            _probe.close()
+        if not busy:
+            break
+        print(f"⚠ 端口 {port} 被占用，自动改用 {port + 1} …")
+        port += 1
+    else:
+        print(f"\n❌ {args.port} ~ {port} 都被占用了，请先关掉多余的窗口再试。")
+        sys.exit(1)
+    args.port = port
     srv = Server((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}/"
     print(f"▶ DYKSDownLoadPC 可视化界面：{url}")
