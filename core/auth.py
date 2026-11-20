@@ -74,12 +74,16 @@ def has_local_auth(plat: str) -> bool:
     return any(m in got and got[m] for m in marks)
 
 
-async def probe_remote(plat: str, keyword: str = "测试") -> tuple[bool, str]:
+async def probe_remote(plat: str, keyword: str = "测试",
+                       cookie_header: str = "") -> tuple[bool, str]:
     """真发一次搜索请求，判断当前登录态/验证态还有效没。
+
+    cookie_header: 传了就用它（浏览器里的实时 cookie），没传就读本地 profile 里的。
 
     返回 (是否可用, 说明)
     """
     import httpx
+    ck = cookie_header or _cookie_header(plat)
     try:
         async with httpx.AsyncClient(timeout=25, follow_redirects=True) as hc:
             if plat == "douyin":
@@ -88,7 +92,7 @@ async def probe_remote(plat: str, keyword: str = "测试") -> tuple[bool, str]:
                 r = await hc.get(url, headers={
                     "User-Agent": UA_DESKTOP,
                     "Referer": "https://www.douyin.com/search/" + quote(keyword),
-                    "Cookie": _cookie_header(plat),
+                    "Cookie": ck,
                 })
                 j = r.json()
                 code = j.get("status_code")
@@ -111,7 +115,7 @@ async def probe_remote(plat: str, keyword: str = "测试") -> tuple[bool, str]:
                     "User-Agent": UA_DESKTOP,
                     "Content-Type": "application/json",
                     "Referer": f"https://www.kuaishou.com/search/video?searchKey={quote(keyword)}",
-                    "Cookie": _cookie_header(plat),
+                    "Cookie": ck,
                 })
                 j = r.json()
                 errs = j.get("errors")
@@ -146,17 +150,20 @@ def _cookie_header(plat: str) -> str:
 
 # ------------------------------------------------------------------ 交互准备
 
-async def prepare(plat: str, timeout: int = 300, open_image: bool = True) -> bool:
-    """打开有头浏览器，让用户扫码登录 / 过人机验证，成功后存进本地 profile。
+async def prepare(plat: str, timeout: int = 300, keyword: str = "测试") -> bool:
+    """打开有头浏览器，让用户扫码登录 / 过人机验证。
+
+    ★ 判定方式：**拿浏览器里的实时 cookie 去真发一次搜索请求**，
+      接口返回正常才算成功 —— 不截图、不猜、不看磁盘上的旧 cookie。
+      一旦检测到成功，**自动把浏览器窗口关掉**。
 
     * 抖音：页面右上角点登录 → 手机抖音 App 扫二维码
-    * 快手：搜索页会弹滑块验证，手动拖一下即可（不必登录）
+    * 快手：搜索页会弹滑块验证，手动拖一下通过即可（不必登录）
     """
     from playwright.async_api import async_playwright
     prof = _pick_profile("dy" if plat == "douyin" else "ks")
     url = ("https://www.douyin.com/" if plat == "douyin"
            else "https://www.kuaishou.com/search/video?searchKey=%E7%8B%AC%E6%A3%8B")
-    shot = Path(__file__).resolve().parent.parent / "profiles" / f"{plat}_login.png"
     async with async_playwright() as pw:
         if plat == "douyin":
             ctx = await pw.chromium.launch_persistent_context(
@@ -177,29 +184,32 @@ async def prepare(plat: str, timeout: int = 300, open_image: bool = True) -> boo
                 print("  点右上角「登录」→ 用手机抖音 App 扫二维码")
             else:
                 print("  页面若弹出滑块验证，手动拖一下通过即可（不必登录）")
-            print(f"  （也可以直接看这个截图文件：{shot}）")
+            print("  ★ 我在后台盯着接口，一检测到成功就【自动关掉这个窗口】，你不用管。")
             t0 = time.time()
-            shot_done = False
+            last = ""
             while time.time() - t0 < timeout:
                 await asyncio.sleep(2)
-                if has_local_auth(plat):
-                    print(f"  ✅ 检测到登录/验证已通过")
-                    ok, why = await probe_remote(plat)
-                    if ok:
-                        return True
-                    print(f"  … 还没生效：{why}")
-                if not shot_done and open_image:
-                    try:
-                        await page.screenshot(path=str(shot), full_page=False)
-                        shot_done = True
-                        if hasattr(shot, "exists"):
-                            import os
-                            os.startfile(str(shot))   # Windows 打开图片
-                            print(f"  📷 已截图并打开：{shot}")
-                    except Exception:
-                        pass
+                # ① 拿浏览器里的【实时】cookie
+                try:
+                    cookies = await ctx.cookies()
+                except Exception:
+                    break                      # 用户自己把窗口关了
+                ck = {c["name"]: c["value"] for c in cookies}
+                header = "; ".join(f"{k}={v}" for k, v in ck.items() if v)
+                # ② 真发一次搜索请求，接口认了才算成功
+                ok, why = await probe_remote(plat, keyword, cookie_header=header)
+                if ok:
+                    print("  ✅ 检测到登录/验证已通过，正在关闭窗口…")
+                    await asyncio.sleep(0.6)
+                    return True
+                if why != last:
+                    last = why
+                    print(f"  … 还没通过：{why}")
             print(f"  ⏰ 超时（{timeout}s）未完成")
             return False
         finally:
-            await ctx.close()
+            try:
+                await ctx.close()
+            except Exception:
+                pass
             _release_profile(prof)

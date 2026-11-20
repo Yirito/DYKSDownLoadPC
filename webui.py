@@ -100,10 +100,42 @@ def save_config(cfg: dict) -> dict:
     return out
 
 
-# ------------------------------------------------------------------ 目录浏览
+# ------------------------------------------------------------------ 目录选择
+
+def pick_directory(initial: str = "") -> str:
+    """弹 Windows 原生「浏览文件夹」对话框，返回选中的目录（取消返回 ""）。
+
+    ★ 用 PowerShell 的 System.Windows.Forms.FolderBrowserDialog：
+      标准托管 UI、自带消息泵，本地桌面必弹
+      （比 ctypes 直调 SHBrowseForFolder 稳，后者在非 UI 线程里常静默返回 None）。
+      脚本走 -EncodedCommand（base64 UTF-16LE），彻底避免 shell 字符串解析问题。
+    """
+    import base64
+    import subprocess
+    try:
+        ps = ("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;"
+              "Add-Type -AssemblyName System.Windows.Forms;"
+              "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
+              "$d.Description = '选择下载目录';"
+              "$d.ShowNewFolderButton = $true;")
+        if initial and os.path.isdir(initial):
+            ps += "$d.SelectedPath = '%s';" % initial.replace("'", "''")
+        ps += "if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath }"
+        enc = base64.b64encode(ps.encode("utf-16-le")).decode("ascii")
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", enc],
+            capture_output=True, timeout=180, encoding="utf-8", errors="replace",
+            creationflags=0x08000000)          # CREATE_NO_WINDOW：不闪黑框
+        line = (proc.stdout or "").strip()
+        if line and ("\\" in line or line.startswith("/")):
+            return line
+        return ""
+    except Exception:
+        return ""
+
 
 def list_dirs(path: str) -> dict:
-    """列出子目录；path 为空时列出盘符 + 常用位置。"""
+    """列出子目录；path 为空时列出盘符 + 常用位置（网页内手动浏览用）。"""
     if not path:
         out = []
         if os.name == "nt":
@@ -325,6 +357,10 @@ class Handler(BaseHTTPRequestHandler):
             path = (qs.get("path") or [""])[0]
             self._json(list_dirs(path))
             return
+        if p == "/api/pickdir":
+            init = (qs.get("init") or [""])[0]
+            self._json({"dir": pick_directory(init)})
+            return
         self._send(404, b"{}")
 
     def do_POST(self):
@@ -379,7 +415,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser(description="DYKSDownLoadPC 本地可视化界面")
-    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--port", type=int, default=8790)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()

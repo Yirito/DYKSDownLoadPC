@@ -93,6 +93,7 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
       <div class="dirrow">
         <input type="text" id="dir" placeholder="默认 ~/Downloads/DYKS">
         <button class="btn ghost" id="pick">选择文件夹…</button>
+        <button class="btn ghost" id="pickweb" title="原生对话框打不开时用这个">网页浏览</button>
       </div>
       <div class="hint">点「开始下载」后自动建子目录：<b>当天日期_关键字</b>，里面再分<b>抖音</b> / <b>快手</b>两个文件夹。<br>
         下载目录、条数、画面方向、平台选择都会<b>自动记住</b>（存在 config.json）。</div>
@@ -230,7 +231,19 @@ $('up').onclick = function(){
   fetch('/api/dirs?path=' + encodeURIComponent(curPath)).then(function(r){return r.json();})
     .then(function(j){ if (j.parent) loadDirs(j.parent); else loadDirs(''); });
 };
-$('pick').onclick = function(){ $('mask').classList.add('on'); loadDirs(''); };
+// 「选择文件夹…」→ 弹 Windows 原生对话框（和「一键签到」看板一样）
+$('pick').onclick = function () {
+  this.disabled = true; this.textContent = '弹窗中…';
+  fetch('/api/pickdir?init=' + encodeURIComponent($('dir').value.trim()))
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      if (j.dir) { $('dir').value = j.dir; saveConfig(); }
+    })
+    .catch(function(){})
+    .finally(function(){ $('pick').disabled = false; $('pick').textContent = '选择文件夹…'; });
+};
+// 「网页浏览」→ 页内文件夹浏览器（原生对话框打不开时的兜底）
+$('pickweb').onclick = function(){ $('mask').classList.add('on'); loadDirs(''); };
 $('cancel').onclick = function(){ $('mask').classList.remove('on'); };
 $('ok').onclick = function(){
   if (curPath) $('dir').value = curPath;
