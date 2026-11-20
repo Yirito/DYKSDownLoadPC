@@ -19,8 +19,12 @@ def human(n: float) -> str:
     return f"{n:.1f}TB"
 
 
-async def download(plat: str, url: str, dest: Path) -> tuple[bool, str]:
-    """下载一个视频到 dest（先写 .part，成功后改名）。"""
+async def download(plat: str, url: str, dest: Path,
+                   on_progress=None) -> tuple[bool, str]:
+    """下载一个视频到 dest（先写 .part，成功后改名）。
+
+    on_progress: 可选回调 (已下载字节, 总字节)，给界面画进度条用。
+    """
     import httpx
     headers = {"User-Agent": UA_DESKTOP if plat == "douyin" else UA_MOBILE}
     if plat == "douyin":
@@ -40,6 +44,11 @@ async def download(plat: str, url: str, dest: Path) -> tuple[bool, str]:
                     async for chunk in r.aiter_bytes(1 << 16):
                         f.write(chunk)
                         got += len(chunk)
+                        if on_progress:
+                            try:
+                                on_progress(got, total)
+                            except Exception:
+                                pass
                         if total:
                             pct = got * 100 // total
                             bar = "█" * (pct // 5) + "░" * (20 - pct // 5)

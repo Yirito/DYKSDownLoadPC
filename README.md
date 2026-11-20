@@ -16,7 +16,7 @@
 
 ---
 
-## ⚡ 快速开始
+## 🖥 可视化界面（推荐）
 
 ```bash
 git clone git@github.com:Yirito/DYKSDownLoadPC.git
@@ -24,8 +24,44 @@ cd DYKSDownLoadPC
 pip install -r requirements.txt
 python -m playwright install chromium     # 装 Chromium（必须）
 
+python webui.py          # 自动打开浏览器 → http://127.0.0.1:8765
+```
+
+界面里能做的事：
+
+| 区块 | 说明 |
+|---|---|
+| 关键字 / 每个平台条数 | 搜索词和数量 |
+| 下载目录 + 「浏览…」 | 浏览按钮弹 **Windows 原生目录选择框** |
+| 画面方向 | 竖屏（默认）/ 横屏 / 都要 |
+| 平台 | 抖音 / 快手，可单选 |
+| 登录 / 验证状态 | 实时显示两平台能不能搜，卡在哪个环节 |
+| 下载进度 | 每条一行：平台、标题、分辨率、大小、进度条、状态 |
+| 运行日志 | 实时输出搜索/下载/验证过程 |
+
+**搜索前如果某个平台需要登录/验证，会自动弹出浏览器**，你在弹出的窗口里
+扫码（抖音）或拖一下滑块（快手），**这个页面会自动继续下载**，不用回来点。
+
+```bash
+python webui.py --port 9000 --no-browser   # 换端口 / 不自动开浏览器
+```
+
+---
+
+## ⌨️ 终端版
+
+```bash
 # 交互式：依次问关键字 / 下载目录 / 数量 / 横竖屏
 python dyks_cli.py
+
+# 直接给参数
+python dyks_cli.py -k 象棋 -d "D:\视频" -n 20 -o portrait
+
+# 提前把登录/验证做好
+python dyks_cli.py --prepare
+
+# 看看当前状态
+python dyks_cli.py --status
 ```
 
 ### 第一次要先「准备」一下（见下文「关于登录」）
@@ -130,6 +166,8 @@ cands.sort(key=lambda x: (x[0], x[1]), reverse=True)   # 体积 → 分辨率
 
 ```
 DYKSDownLoadPC/
+├── webui.py             # 本地可视化界面（起服务 + 自动开浏览器）
+├── web/index.html       # 界面页面
 ├── dyks_cli.py          # 终端入口
 ├── core/
 │   ├── engine.py        # 解析引擎（Playwright + 无头 Chromium）

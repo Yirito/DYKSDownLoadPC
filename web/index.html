@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DYKSDownLoadPC · 抖音/快手批量下载</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f5f6f4;color:#22221f;
+ font:14px/1.65 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+.wrap{max-width:980px;margin:0 auto;padding:24px 18px 60px}
+h1{font-size:21px;font-weight:600;margin:0 0 4px}
+.sub{color:#78786f;font-size:13px;margin-bottom:18px}
+.card{background:#fff;border:.5px solid rgba(0,0,0,.12);border-radius:14px;
+ padding:18px;margin-bottom:14px}
+label{display:block;font-size:12px;color:#78786f;margin-bottom:5px}
+input[type=text],input[type=number]{width:100%;padding:10px 12px;border:.5px solid rgba(0,0,0,.18);
+ border-radius:9px;font:15px inherit;background:#fff}
+input:focus{outline:2px solid #1d9e7566;border-color:#1d9e75}
+.row{display:flex;gap:12px;flex-wrap:wrap}
+.row>div{flex:1;min-width:150px}
+.btn{display:inline-block;padding:10px 18px;border:0;border-radius:9px;background:#1d9e75;
+ color:#fff;font:15px inherit;font-weight:500;cursor:pointer}
+.btn.ghost{background:#fff;color:#22221f;border:.5px solid rgba(0,0,0,.18);font-weight:400}
+.btn:disabled{background:#b9c4bf;cursor:not-allowed}
+.chk{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-top:4px}
+.chk label{display:inline-flex;align-items:center;gap:6px;margin:0;font-size:14px;color:#22221f}
+.dirrow{display:flex;gap:8px}
+.dirrow input{flex:1}
+.hint{font-size:12px;color:#8a8a84;margin-top:8px;line-height:1.7}
+.status{display:flex;gap:10px;flex-wrap:wrap}
+.tag{font-size:12px;padding:5px 11px;border-radius:20px;background:#f0f0ec;color:#666}
+.tag.ok{background:#e4f5ee;color:#1a7d5c}
+.tag.bad{background:#fdeceb;color:#b3403a}
+.tag.warn{background:#fdf3e0;color:#9a6b12}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;color:#78786f;font-weight:400;font-size:12px;padding:6px 4px}
+td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
+.bar{height:7px;background:#eceae3;border-radius:99px;overflow:hidden;min-width:110px}
+.bar i{display:block;height:100%;width:0;background:#1d9e75;transition:width .25s}
+.name{max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pill{font-size:11px;padding:2px 8px;border-radius:20px;background:#f0f0ec;color:#666}
+.pill.dy{background:#e8f0fb;color:#2b6cb0}
+.pill.ks{background:#fdeee0;color:#a4601a}
+.log{height:190px;overflow:auto;background:#1d1f1e;color:#cfd4cd;border-radius:9px;
+ padding:11px;font:12px/1.7 ui-monospace,Consolas,monospace;white-space:pre-wrap}
+.log .w{color:#f0c674}.log .e{color:#ff8b7e}.log .i{color:#8fd3a8}
+#phase{font-weight:600}
+.spin{display:inline-block;width:13px;height:13px;border:2px solid #d8d8d2;
+ border-top-color:#1d9e75;border-radius:50%;animation:sp .7s linear infinite;
+ vertical-align:-2px;margin-right:6px}
+@keyframes sp{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>DYKSDownLoadPC</h1>
+  <div class="sub">抖音 / 快手 · 关键词批量下载 · 无水印 · 最高质量</div>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <label>关键字</label>
+        <input type="text" id="kw" placeholder="例如：象棋">
+      </div>
+      <div style="max-width:170px">
+        <label>每个平台条数</label>
+        <input type="number" id="cnt" value="10" min="1" max="200">
+      </div>
+    </div>
+
+    <div style="margin-top:14px">
+      <label>下载目录</label>
+      <div class="dirrow">
+        <input type="text" id="dir" placeholder="默认 ./downloads">
+        <button class="btn ghost" id="pick">浏览…</button>
+      </div>
+      <div class="hint">点「开始下载」后会自动建子目录：<b>当天日期_关键字</b>，里面再分<b>抖音</b> / <b>快手</b>两个文件夹。</div>
+    </div>
+
+    <div class="row" style="margin-top:14px">
+      <div>
+        <label>画面方向</label>
+        <div class="chk">
+          <label><input type="radio" name="ori" value="portrait" checked>竖屏</label>
+          <label><input type="radio" name="ori" value="landscape">横屏</label>
+          <label><input type="radio" name="ori" value="both">都要</label>
+        </div>
+      </div>
+      <div>
+        <label>平台</label>
+        <div class="chk">
+          <label><input type="checkbox" id="pdy" checked>抖音</label>
+          <label><input type="checkbox" id="pks" checked>快手</label>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:18px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <button class="btn" id="start">开始下载</button>
+      <span id="phase" style="color:#78786f"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <label>登录 / 验证状态</label>
+    <div class="status" id="status"></div>
+    <div class="hint">抖音搜索需要<b>扫码登录</b>，快手需要过<b>滑块验证</b>（不必登录）。
+      失效会自动弹浏览器重新处理，登录态只存在本机。</div>
+  </div>
+
+  <div class="card">
+    <label>下载进度</label>
+    <table>
+      <thead><tr><th style="width:46px">平台</th><th>标题</th><th style="width:96px">分辨率</th>
+      <th style="width:74px">大小</th><th style="width:150px">进度</th><th style="width:70px">状态</th></tr></thead>
+      <tbody id="items"><tr><td colspan="6" style="color:#8a8a84">还没有任务</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <label>运行日志</label>
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<script>
+var $ = function (id) { return document.getElementById(id); };
+var lastLog = 0, lastSig = '';
+
+function fmt(n) {
+  n = n || 0;
+  if (n < 1024) return n + 'B';
+  if (n < 1048576) return (n/1024).toFixed(1) + 'KB';
+  if (n < 1073741824) return (n/1048576).toFixed(1) + 'MB';
+  return (n/1073741824).toFixed(2) + 'GB';
+}
+function esc(s) { return String(s||'').replace(/[&<>]/g, function(c){
+  return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c]; }); }
+
+function loadStatus() {
+  fetch('/api/status').then(r=>r.json()).then(j=>{
+    $('status').innerHTML = (j.items||[]).map(function(it){
+      var cls = it.ok ? 'ok' : (it.local ? 'warn' : 'bad');
+      var txt = it.ok ? '✅ 可用' : (it.local ? '⚠ 已失效' : '❌ 未就绪');
+      return '<span class="tag '+cls+'">'+esc(it.name)+' '+txt+'</span>'
+           + '<span class="tag">'+esc(it.why||'')+'</span>';
+    }).join('');
+  }).catch(function(){});
+}
+
+function render(st) {
+  // 日志
+  if ((st.log||[]).length !== lastLog) {
+    var box = $('log'), html = '';
+    (st.log||[]).slice(-200).forEach(function(l){
+      var c = l.lv === 'err' ? 'e' : (l.lv === 'warn' ? 'w' : 'i');
+      html += '<div class="'+c+'">['+l.t+'] '+esc(l.msg)+'</div>';
+    });
+    box.innerHTML = html;
+    box.scrollTop = box.scrollHeight;
+    lastLog = (st.log||[]).length;
+  }
+  // 阶段
+  $('phase').innerHTML = st.running ? '<span class="spin"></span>' + esc(st.phase||'处理中') : (esc(st.phase||''));
+  $('start').disabled = !!st.running;
+  $('start').textContent = st.running ? '下载中…' : '开始下载';
+  // 列表
+  var tb = $('items'), its = st.items||[];
+  if (!its.length) { tb.innerHTML = '<tr><td colspan="6" style="color:#8a8a84">还没有任务</td></tr>'; return; }
+  var sig = JSON.stringify(its);
+  if (sig === lastSig) return;
+  lastSig = sig;
+  tb.innerHTML = its.map(function(it){
+    var pl = it.plat === 'douyin' ? '<span class="pill dy">抖音</span>' : '<span class="pill ks">快手</span>';
+    var stt = it.state === 'done' ? '✅ 完成'
+            : it.state === 'failed' ? '❌ 失败'
+            : it.state === 'need_auth' ? '🔑 待登录' : '⬇ 下载中';
+    var pct = it.state === 'done' ? 100 : (it.pct || 0);
+    return '<tr><td>'+pl+'</td>'
+      + '<td><div class="name" title="'+esc(it.name)+'">'+esc(it.name||'')+'</div></td>'
+      + '<td>'+esc(it.wh||'')+'</td>'
+      + '<td>'+(it.size?fmt(it.size):'')+'</td>'
+      + '<td><div class="bar"><i style="width:'+pct+'%"></i></div></td>'
+      + '<td>'+stt+'</td></tr>';
+  }).join('');
+}
+
+function poll() {
+  fetch('/api/state').then(r=>r.json()).then(render).catch(function(){});
+}
+
+$('pick').onclick = function () {
+  this.disabled = true; this.textContent = '选择中…';
+  fetch('/api/pickdir').then(r=>r.json()).then(j=>{
+    if (j.dir) $('dir').value = j.dir;
+  }).finally(function(){ $('pick').disabled=false; $('pick').textContent='浏览…'; });
+};
+
+$('start').onclick = function () {
+  var plats = [];
+  if ($('pdy').checked) plats.push('douyin');
+  if ($('pks').checked) plats.push('kuaishou');
+  if (!plats.length) { alert('至少选一个平台'); return; }
+  var ori = document.querySelector('input[name=ori]:checked').value;
+  fetch('/api/start', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({keyword:$('kw').value, dir:$('dir').value,
+                          count:$('cnt').value, orientation:ori, platforms:plats})})
+  .then(r=>r.json()).then(j=>{ if(!j.ok) alert(j.msg||'启动失败'); });
+};
+
+setInterval(poll, 800);
+setInterval(loadStatus, 4000);
+poll(); loadStatus();
+</script>
+</body>
+</html>
