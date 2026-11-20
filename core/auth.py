@@ -188,6 +188,62 @@ def _extract_feeds(j) -> list:
     return scan(j) or []
 
 
+async def check_auth(plat: str, cookie_header: str = "") -> tuple[bool, str]:
+    """只看【登录/验证状态】，不看有没有搜索结果。
+
+    ★ 这是判定登录成功的正确标准：
+      抖音：status_code 不再是 2483 = 已登录
+            （已登录但搜索无结果 ≠ 没登录！）
+      快手：result 不再是 400002 = 过了验证
+    """
+    import httpx
+    ck = cookie_header or _cookie_header(plat)
+    try:
+        async with httpx.AsyncClient(timeout=25, follow_redirects=True) as hc:
+            if plat == "douyin":
+                url = ("https://www.douyin.com/aweme/v1/web/search/item/"
+                       f"?device_platform=webapp&aid=6383&keyword=test&count=5")
+                r = await hc.get(url, headers={
+                    "User-Agent": UA_DESKTOP,
+                    "Referer": "https://www.douyin.com/search/test",
+                    "Cookie": ck,
+                })
+                try:
+                    j = r.json()
+                except Exception:
+                    return False, f"响应不是 JSON (HTTP {r.status_code})"
+                code = j.get("status_code") if isinstance(j, dict) else None
+                msg = str(j.get("status_msg", "")) if isinstance(j, dict) else ""
+                if code == 2483 or "请先登录" in msg:
+                    return False, "抖音返回 2483「请先登录」"
+                return True, f"已登录 (status_code={code})"
+            else:
+                body = {
+                    "operationName": "visionSearchPhoto",
+                    "variables": {"keyword": "test", "page": "search", "cursor": ""},
+                    "query": ("query visionSearchPhoto($keyword:String,$page:String,$cursor:String){"
+                              "visionSearchPhoto(keyword:$keyword,page:$page,cursor:$cursor){"
+                              "feeds{photoId caption srcNoMark}}}"),
+                }
+                r = await hc.post("https://www.kuaishou.com/graphql", json=body, headers={
+                    "User-Agent": UA_DESKTOP,
+                    "Content-Type": "application/json",
+                    "Referer": "https://www.kuaishou.com/search/video?searchKey=test",
+                    "Cookie": ck,
+                })
+                try:
+                    j = r.json()
+                except Exception:
+                    return False, f"响应不是 JSON (HTTP {r.status_code})"
+                d = j.get("data") if isinstance(j, dict) else None
+                res = d.get("result") if isinstance(d, dict) else None
+                if res == 400002:
+                    return False, "快手要求过人机验证（result=400002，滑块）"
+                return True, f"已过验证 (result={res})"
+    except Exception as e:
+        return False, f"探测异常：{str(e)[:80]}"
+
+
 async def probe_remote(plat: str, keyword: str = "测试",
                        cookie_header: str = "") -> tuple[bool, str]:
     """真发一次搜索请求，判断当前登录态/验证态还有效没。
@@ -271,57 +327,101 @@ def _cookie_header(plat: str) -> str:
 
 # ------------------------------------------------------------------ 交互准备
 
+def _home_url(plat: str) -> str:
+    """登录页地址。★ 快手用【网页版】（www.kuaishou.com），不是手机版页面。"""
+    if plat == "douyin":
+        return "https://www.douyin.com/"
+    return "https://www.kuaishou.com/"
+
+
+def _login_url(plat: str) -> str:
+    """要弹给人看的页面。
+
+    ★ 快手直接开【搜索页】—— 滑块验证是在发起搜索时才弹的，
+      光开首页用户看不到要验证什么。
+    """
+    if plat == "douyin":
+        return "https://www.douyin.com/"
+    return "https://www.kuaishou.com/search/video?searchKey=test"
+
+
+async def _open_ctx(pw, plat: str, prof: str, headless: bool):
+    """按平台建浏览器上下文（抖音桌面 UA，快手也用桌面 UA 走网页版）。"""
+    if plat == "douyin":
+        return await pw.chromium.launch_persistent_context(
+            user_data_dir=str(_PROFILE_DIR / prof), headless=headless, channel="chrome",
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+            viewport={"width": 1440, "height": 900}, locale="zh-CN", user_agent=UA_DESKTOP)
+    return await pw.chromium.launch_persistent_context(
+        user_data_dir=str(_PROFILE_DIR / prof), headless=headless, channel="chrome",
+        args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+        viewport={"width": 1440, "height": 900}, locale="zh-CN", user_agent=UA_DESKTOP)
+
+
 async def prepare(plat: str, timeout: int = 300, keyword: str = "测试") -> bool:
-    """打开有头浏览器，让用户扫码登录 / 过人机验证。
+    """确保该平台处于【已登录 / 已过验证】状态。
 
-    ★ 判定方式：**拿浏览器里的实时 cookie 去真发一次搜索请求**，
-      接口返回正常才算成功 —— 不截图、不猜、不看磁盘上的旧 cookie。
-      一旦检测到成功，**自动把浏览器窗口关掉**。
+    流程：
+      ① 先用无头浏览器快速探一下（拿浏览器里的实时 cookie）
+         → 已经登录？直接返回 True，【根本不弹浏览器】
+      ② 没登录才开有头窗口让用户扫码 / 过滑块
+         → 后台盯着接口，一旦通过就【自动关掉窗口】
 
-    * 抖音：页面右上角点登录 → 手机抖音 App 扫二维码
-    * 快手：搜索页会弹滑块验证，手动拖一下通过即可（不必登录）
+    ★ 判定标准是 check_auth（不再返回 2483 / 400002），
+      不是「必须搜到结果」—— 已登录但某关键词没结果 ≠ 没登录。
     """
     from playwright.async_api import async_playwright
     prof = _pick_profile("dy" if plat == "douyin" else "ks")
-    url = ("https://www.douyin.com/" if plat == "douyin"
-           else "https://www.kuaishou.com/search/video?searchKey=%E7%8B%AC%E6%A3%8B")
+
+    # ── ① 先快速检查（无头，不打扰用户）──
     async with async_playwright() as pw:
-        if plat == "douyin":
-            ctx = await pw.chromium.launch_persistent_context(
-                user_data_dir=str(_PROFILE_DIR / prof), headless=False, channel="chrome",
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-                viewport={"width": 1440, "height": 900}, locale="zh-CN", user_agent=UA_DESKTOP)
-        else:
-            ctx = await pw.chromium.launch_persistent_context(
-                user_data_dir=str(_PROFILE_DIR / prof), headless=False, channel="chrome",
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-                viewport={"width": 390, "height": 844}, locale="zh-CN",
-                user_agent=UA_MOBILE, is_mobile=True, has_touch=True)
+        ctx = await _open_ctx(pw, plat, prof, headless=True)
         try:
             page = await ctx.new_page()
-            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            print(f"\n▶ 已打开【{PLAT_NAME[plat]}】：{url}")
+            await page.goto(_home_url(plat), wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(4000)
+            ck = {c["name"]: c["value"] for c in await ctx.cookies()}
+            header = "; ".join(f"{k}={v}" for k, v in ck.items() if v)
+            ok, why = await check_auth(plat, cookie_header=header)
+            if ok:
+                print(f"  ✅ {PLAT_NAME[plat]} 已登录，无需重复登录（{why}）")
+                return True
+        except Exception:
+            pass
+        finally:
+            try:
+                await ctx.close()
+            except Exception:
+                pass
+            _release_profile(prof)
+
+    # ── ② 没登录 → 弹有头窗口 ──
+    prof = _pick_profile("dy" if plat == "douyin" else "ks")
+    async with async_playwright() as pw:
+        ctx = await _open_ctx(pw, plat, prof, headless=False)
+        try:
+            page = await ctx.new_page()
+            await page.goto(_login_url(plat), wait_until="domcontentloaded", timeout=60000)
+            print(f"\n▶ 已打开【{PLAT_NAME[plat]}】网页版：{_login_url(plat)}")
             if plat == "douyin":
                 print("  点右上角「登录」→ 用手机抖音 App 扫二维码")
             else:
-                print("  页面若弹出滑块验证，手动拖一下通过即可（不必登录）")
-            print("  ★ 我在后台盯着接口，一检测到成功就【自动关掉这个窗口】，你不用管。")
+                print("  页面若弹出滑块验证，手动拖一下通过即可（不必登录账号）")
+            print("  ★ 我在后台盯着接口，一检测到通过就【自动关掉这个窗口】。")
             t0 = time.time()
             last = ""
             while time.time() - t0 < timeout:
                 await asyncio.sleep(2)
-                # ① 拿浏览器里的【实时】cookie
                 try:
                     cookies = await ctx.cookies()
                 except Exception:
-                    break                      # 用户自己把窗口关了
+                    break                      # 用户自己关了窗口
                 ck = {c["name"]: c["value"] for c in cookies}
                 header = "; ".join(f"{k}={v}" for k, v in ck.items() if v)
-                # ② 真发一次搜索请求，接口认了才算成功
-                ok, why = await probe_remote(plat, keyword, cookie_header=header)
+                ok, why = await check_auth(plat, cookie_header=header)
                 if ok:
                     print("  ✅ 检测到登录/验证已通过，正在关闭窗口…")
-                    await asyncio.sleep(0.6)
+                    await asyncio.sleep(0.5)
                     return True
                 if why != last:
                     last = why

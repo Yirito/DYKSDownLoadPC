@@ -172,6 +172,14 @@ def probe_sync(plat: str):
         return False, str(e)[:80]
 
 
+def check_sync(plat: str):
+    """登录/验证状态（不看有没有搜索结果）。"""
+    try:
+        return asyncio.run(auth.check_auth(plat))
+    except Exception as e:
+        return False, str(e)[:80]
+
+
 def refresh_status_async():
     """后台线程：真去探测两平台状态，结果写进缓存。"""
     global _status_thread
@@ -185,7 +193,8 @@ def refresh_status_async():
 def _refresh_status_worker():
     out = []
     for plat in ("douyin", "kuaishou"):
-        ok, why = probe_sync(plat)
+        # ★ 用 check_auth（只看登录/验证状态），不要用「必须搜到结果」当标准
+        ok, why = check_sync(plat)
         out.append({"plat": plat, "name": PLAT_NAME[plat], "ok": ok, "why": why,
                     "local": auth.has_local_auth(plat)})
     with _lock:
@@ -228,7 +237,7 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
     for plat in plats:
         # ⚠️ 这里本身就在事件循环里，必须直接 await，不能用 asyncio.run()
         try:
-            ok, why = await auth.probe_remote(plat)
+            ok, why = await auth.check_auth(plat)
         except Exception as e:
             ok, why = False, f"探测异常：{str(e)[:80]}"
         if not ok:

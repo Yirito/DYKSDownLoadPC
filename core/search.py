@@ -278,12 +278,13 @@ async def _search_once(plat: str, keyword: str, limit: int,
                     viewport={"width": 1440, "height": 900}, locale="zh-CN",
                     user_agent=UA_DESKTOP)
             else:
+                # ★ 快手也用【网页版 + 桌面 UA】—— 手机版页面弹出来给用户登录很怪
                 ctx = await pw.chromium.launch_persistent_context(
                     user_data_dir=str(_PROFILE_DIR / prof), headless=headless,
                     channel="chrome",
                     args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-                    viewport={"width": 390, "height": 844}, locale="zh-CN",
-                    user_agent=UA_MOBILE, is_mobile=True, has_touch=True)
+                    viewport={"width": 1440, "height": 900}, locale="zh-CN",
+                    user_agent=UA_DESKTOP)
             try:
                 if plat == "douyin":
                     return await _search_douyin(ctx, keyword, limit)
