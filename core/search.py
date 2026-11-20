@@ -15,7 +15,7 @@ import asyncio
 from dataclasses import dataclass
 from urllib.parse import quote
 
-from auth import AuthExpired
+from auth import AuthExpired, _extract_awemes, _extract_feeds
 from engine import (UA_DESKTOP, UA_MOBILE, _PROFILE_DIR, _pick_profile,
                     _release_profile)
 
@@ -113,19 +113,31 @@ async def _search_douyin(ctx, keyword: str, limit: int) -> list[Item]:
             need_login = True
             return
         d = j.get("data") or {}
-        lst = d.get("aweme_list") or d.get("aweme_details") or []
+        lst = d.get("aweme_list") or d.get("aweme_details") or [] if isinstance(d, dict) else []
+        if not lst:
+            # ⚠️ 登录态下 data 可能直接是 list —— 用健壮提取器兜住
+            lst = _extract_awemes(j)
         if lst:
             buckets.append(lst)
 
     page.on("response", lambda r: asyncio.create_task(on_resp(r)))
     await page.goto(f"https://www.douyin.com/search/{quote(keyword)}?type=video",
                     wait_until="domcontentloaded", timeout=45000)
-    await page.wait_for_timeout(5000)
-    for _ in range(5):
-        await page.mouse.wheel(0, 2600)
-        await page.wait_for_timeout(2000)
+    # ★ 抖音搜索：第一页常常 aweme_list=null，真正的数据在【翻页请求】里
+    #   → 必须等够时间 + 多滚几次，让它把 offset=16/26 的分页也发出来
+    await page.wait_for_timeout(9000)
+    for i in range(8):
+        await page.mouse.wheel(0, 3000)
+        await page.wait_for_timeout(2600)
         if sum(len(b) for b in buckets) >= limit:
             break
+    if not buckets:
+        # 再来一轮：有时第一下滚动没生效
+        for i in range(4):
+            await page.mouse.wheel(0, 3500)
+            await page.wait_for_timeout(2800)
+            if sum(len(b) for b in buckets) >= limit:
+                break
     await page.close()
     if need_login and not buckets:
         raise AuthExpired("douyin", "抖音搜索返回 2483「请先登录」")
@@ -172,27 +184,25 @@ async def _search_kuaishou(ctx, keyword: str, limit: int) -> list[Item]:
             j = await r.json()
         except Exception:
             return
-        if j.get("result") == 400002 or (j.get("data") or {}).get("result") == 400002:
+        res = j.get("result") if isinstance(j, dict) else None
+        if res is None and isinstance(j, dict):
+            d = j.get("data")
+            res = d.get("result") if isinstance(d, dict) else None
+        if res == 400002:
             need_verify = True
             return
-        for path in (("data", "feeds"), ("data", "visionSearchPhoto", "feeds"),
-                     ("feeds",), ("data", "photo", "feeds")):
-            node = j
-            for k in path:
-                node = node.get(k) if isinstance(node, dict) else None
-                if node is None:
-                    break
-            if isinstance(node, list) and node:
-                buckets.append(node)
-                return
+        # ⚠️ data 可能是 dict 也可能是 list，用健壮提取器
+        feeds = _extract_feeds(j)
+        if feeds:
+            buckets.append(feeds)
 
     page.on("response", lambda r: asyncio.create_task(on_resp(r)))
     await page.goto(f"https://www.kuaishou.com/search/video?searchKey={quote(keyword)}",
                     wait_until="domcontentloaded", timeout=45000)
-    await page.wait_for_timeout(6000)
-    for _ in range(5):
-        await page.mouse.wheel(0, 2400)
-        await page.wait_for_timeout(2000)
+    await page.wait_for_timeout(8000)
+    for i in range(8):
+        await page.mouse.wheel(0, 2600)
+        await page.wait_for_timeout(2400)
         if sum(len(b) for b in buckets) >= limit:
             break
     await page.close()
@@ -227,8 +237,35 @@ async def _search_kuaishou(ctx, keyword: str, limit: int) -> list[Item]:
 
 
 async def search(plat: str, keyword: str, limit: int = 30,
-                 headless: bool = True) -> list[Item]:
-    """搜索一个平台。登录态/验证态失效时抛 AuthExpired。"""
+                 headless: bool = True, retries: int = 2) -> list[Item]:
+    """搜索一个平台。登录态/验证态失效时抛 AuthExpired。
+
+    ★ 会自动重试：抖音的搜索请求在无头浏览器下【触发不稳定】
+      （有请求但 aweme_list=null，或干脆不发），
+      重开一次浏览器 + 拉长等待往往就能拿到。
+    """
+    from playwright.async_api import async_playwright
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            r = await _search_once(plat, keyword, limit, headless)
+            if r:
+                return r
+            if attempt < retries:
+                await asyncio.sleep(4 + attempt * 3)
+        except AuthExpired:
+            raise
+        except Exception as e:
+            last_exc = e
+            if attempt < retries:
+                await asyncio.sleep(4 + attempt * 3)
+    if last_exc:
+        raise last_exc
+    return []
+
+
+async def _search_once(plat: str, keyword: str, limit: int,
+                        headless: bool) -> list[Item]:
     from playwright.async_api import async_playwright
     prof = _pick_profile("dy" if plat == "douyin" else "ks")
     try:

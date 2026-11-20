@@ -67,6 +67,29 @@ async def show_status() -> None:
     print("\n提示：跑 `python dyks_cli.py --prepare` 可以扫码登录 / 过人机验证。")
 
 
+async def selftest() -> None:
+    """自检：逐个平台测「登录态」和「搜索接口」，看看到底卡在哪一环。"""
+    print("=== 自检 ===")
+    kw = "象棋"
+    for plat in ("douyin", "kuaishou"):
+        print(f"\n【{PLAT_NAME[plat]}】")
+        ck = auth._cookies_of(plat)
+        marks = [m for m in auth.AUTH_MARK[plat] if m in ck]
+        print(f"  ① 本地凭证 cookie 名: {marks or '（无）'}")
+        ok, why = await auth.probe_remote(plat, kw)
+        print(f"  ② 纯 HTTP 探测: {'✅ 通' if ok else '❌ 不通'}  {why}")
+        print(f"  ③ 浏览器实际搜索…")
+        try:
+            items = await search_mod.search(plat, kw, limit=3, retries=0)
+            print(f"     {'✅ 搜到 ' + str(len(items)) + ' 条' if items else '⚠ 0 条（可能是本机 IP 被风控）'}")
+            for it in items[:3]:
+                print(f"       - {it.desc[:36]}  {it.size_mb:.2f}MB")
+        except Exception as e:
+            print(f"     ❌ {str(e)[:100]}")
+    print("\n提示：「浏览器实际搜索」这一步靠的是抖音/快手自己发搜索请求，"
+          "\n      如果本机 IP 被风控就会 0 条；换个网络环境或稍后再试即可。")
+
+
 async def ensure_auth(plat: str, keyword: str) -> bool:
     """确保该平台能搜：先探，探不过就弹浏览器让用户处理。"""
     ok, why = await auth.probe_remote(plat, keyword)
@@ -155,12 +178,17 @@ async def main() -> None:
     ap.add_argument("--platform", "-p", choices=["douyin", "kuaishou", "both"], default="both")
     ap.add_argument("--prepare", action="store_true", help="提前扫码登录 / 过人机验证")
     ap.add_argument("--status", action="store_true", help="查看登录/验证状态")
+    ap.add_argument("--selftest", action="store_true",
+                    help="自检：登录态 + 搜索接口是否真的通（各平台各测一次）")
     ap.add_argument("--show-browser", action="store_true", help="搜索时显示浏览器窗口")
     ap.add_argument("--dry-run", action="store_true", help="只列清单不下载")
     args = ap.parse_args()
 
     if args.status:
         await show_status()
+        return
+    if args.selftest:
+        await selftest()
         return
     if args.prepare:
         for plat in ("douyin", "kuaishou"):

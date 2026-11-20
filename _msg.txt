@@ -1,0 +1,27 @@
+fix: 登录后窗口不关（判定崩了）+ 去掉「网页浏览」+ 搜索重试与自检
+
+① 窗口不关的根因：登录后抖音接口返回的 data 变成了【数组】，
+   里面每项是 {"type":1,"aweme_info":{...}} 包装，
+   而我的解析按字典取 → 抛 'list' object has no attribute 'get'
+   → 永远判定不成功 → 窗口一直不关。
+   修法：新增健壮提取器 _extract_awemes / _extract_feeds
+   （到处找「像列表的数组」→ 解开 aweme_info 包装），
+   auth.probe_remote 与 core/search 共用。
+
+② 另外发现两个隐蔽坑：
+   - Chrome 新版 Cookies 库在 Default/Network/Cookies（旧路径读不到）
+   - Chrome 在磁盘上把 cookie【值】加密了，直接读 SQLite 只有空串
+     → has_local_auth 改成只看 cookie【名】存不存在
+     → 真正的判定一律走「浏览器实时 cookie + 真发请求」
+
+③ 「网页浏览」按钮、弹层、CSS、JS 全部移除（原生对话框够用了）。
+
+④ 抖音搜索在无头浏览器下触发不稳定 → 自动重试 3 轮
+   （重开浏览器 + 拉长等待 + 滚动到分页请求）。
+
+⑤ 新增 --selftest：一条命令测出「本地凭证 / 纯 HTTP 探测 / 浏览器实际搜索」
+   三层卡在哪，直接告诉用户是不是本机 IP 被风控。
+
+实测（已登录的 profile）：
+  抖音 ③ 浏览器实际搜索 ✅ 搜到 3 条（26.48MB / 16.79MB / 1.65MB）
+  快手 ③ 0 条 → 需要先过滑块（未验证），符合预期

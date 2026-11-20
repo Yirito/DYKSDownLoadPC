@@ -47,31 +47,145 @@ class AuthExpired(Exception):
 # ------------------------------------------------------------------ 状态探测
 
 def _cookies_of(plat: str) -> dict:
-    """从本地 profile 的 Cookies 库里读 cookie 名（不联网，最快）。"""
+    """从本地 profile 的 Cookies 库里读 cookie 名（不联网，最快）。
+
+    ⚠️ 新版 Chrome 的 Cookies 库在 `Default/Network/Cookies`，
+       旧版在 `Default/Cookies` —— 两个路径都要试，
+       否则永远读到空、判定永远失败。
+    """
     import sqlite3
     prof = "dy" if plat == "douyin" else "ks"
-    db = _PROFILE_DIR / prof / "Default" / "Cookies"
+    base = _PROFILE_DIR / prof / "Default"
     names: dict[str, str] = {}
-    if not db.exists():
-        return names
-    try:
-        tmp = db.with_suffix(".copy")
-        tmp.write_bytes(db.read_bytes())
-        con = sqlite3.connect(str(tmp))
-        for row in con.execute("SELECT name, value FROM cookies"):
-            names[row[0]] = row[1]
-        con.close()
-        tmp.unlink(missing_ok=True)
-    except Exception:
-        pass
+    for db in (base / "Network" / "Cookies", base / "Cookies"):
+        if not db.exists():
+            continue
+        try:
+            tmp = db.with_suffix(".readcopy")
+            tmp.write_bytes(db.read_bytes())
+            con = sqlite3.connect(str(tmp))
+            for row in con.execute("SELECT name, value FROM cookies"):
+                names[row[0]] = row[1]
+            con.close()
+            tmp.unlink(missing_ok=True)
+            if names:
+                break
+        except Exception:
+            pass
     return names
 
 
 def has_local_auth(plat: str) -> bool:
-    """本地 profile 里有没有登录特征 cookie（不判断是否过期）。"""
+    """本地 profile 里有没有登录特征 cookie（只判断「存不存在」，不判断是否过期）。
+
+    ⚠️ 只看 cookie【名】不看值：Chrome 在磁盘上把 cookie 值加密了，
+       直接读 SQLite 拿不到明文（读出来是空串），
+       所以「有没有值」这个判断永远为假 → 状态栏会一直显示「未就绪」。
+    真能不能搜，交给浏览器实时 cookie 去探测（prepare / search 里做）。
+    """
     marks = AUTH_MARK.get(plat, ())
     got = _cookies_of(plat)
-    return any(m in got and got[m] for m in marks)
+    return any(m in got for m in marks)
+
+
+def _extract_awemes(j) -> list:
+    """从抖音的搜索响应里把视频列表抠出来。
+
+    ⚠️ 抖音的响应形状有三层坑：
+       ① `data` 可能是 dict 也可能是 list（登录态下会变）
+       ② `aweme_list` 常常是 null，真正的数据在 `data[]` 里
+       ③ `data[]` 的每一项是 `{"type":1,"aweme_info":{...}}` 包装
+    所以这里：到处找「像 aweme 列表的数组」→ 再把 aweme_info 包装解开。
+    """
+    def unwrap(lst):
+        out = []
+        for x in lst:
+            if isinstance(x, dict):
+                ai = x.get("aweme_info")
+                if isinstance(ai, dict):
+                    out.append(ai)
+                    continue
+            out.append(x)
+        return out
+
+    def looks(x):
+        if not (isinstance(x, list) and x):
+            return False
+        for i in x[:3]:
+            if not isinstance(i, dict):
+                return False
+            if not ("aweme_id" in i or "aweme_info" in i or "video" in i):
+                return False
+        return True
+
+    if looks(j):
+        return unwrap(j)
+    if not isinstance(j, dict):
+        return []
+    for path in (("data",), ("data", "aweme_list"), ("aweme_list",),
+                 ("data", "aweme_details"), ("aweme_details",),
+                 ("result", "aweme_list")):
+        node = j
+        for k in path:
+            node = node.get(k) if isinstance(node, dict) else None
+            if node is None:
+                break
+        if looks(node):
+            return unwrap(node)
+    # 兜底：全树扫一遍，找第一个像 aweme 列表的数组
+    def scan(x):
+        if looks(x):
+            return unwrap(x)
+        if isinstance(x, dict):
+            for v in x.values():
+                r = scan(v)
+                if r:
+                    return r
+        elif isinstance(x, list):
+            for v in x:
+                r = scan(v)
+                if r:
+                    return r
+        return None
+    return scan(j) or []
+
+
+def _extract_feeds(j) -> list:
+    """从快手的 GraphQL 响应里把 feeds 抠出来（data 可能是 dict 也可能是 list）。"""
+    def looks(x):
+        return (isinstance(x, list) and x and isinstance(x[0], dict)
+                and ("photoId" in x[0] or "caption" in x[0] or "srcNoMark" in x[0]))
+
+    if looks(j):
+        return j
+    if not isinstance(j, dict):
+        return []
+    for path in (("data", "feeds"), ("data", "searchPhoto", "feeds"),
+                 ("data", "visionSearchPhoto", "feeds"), ("feeds",),
+                 ("data", "photo", "feeds")):
+        node = j
+        for k in path:
+            node = node.get(k) if isinstance(node, dict) else None
+            if node is None:
+                break
+        if looks(node):
+            return node
+
+    def scan(x):
+        if looks(x):
+            return x
+        if isinstance(x, dict):
+            for v in x.values():
+                r = scan(v)
+                if r:
+                    return r
+        elif isinstance(x, list):
+            for v in x:
+                r = scan(v)
+                if r:
+                    return r
+        return None
+    return scan(j) or []
 
 
 async def probe_remote(plat: str, keyword: str = "测试",
@@ -94,11 +208,15 @@ async def probe_remote(plat: str, keyword: str = "测试",
                     "Referer": "https://www.douyin.com/search/" + quote(keyword),
                     "Cookie": ck,
                 })
-                j = r.json()
-                code = j.get("status_code")
-                if code == 2483 or "请先登录" in str(j.get("status_msg", "")):
+                try:
+                    j = r.json()
+                except Exception:
+                    return False, f"抖音响应不是 JSON (HTTP {r.status_code})"
+                code = j.get("status_code") if isinstance(j, dict) else None
+                if code == 2483 or "请先登录" in str((j or {}).get("status_msg", "")
+                                                    if isinstance(j, dict) else ""):
                     return False, "抖音返回 2483「请先登录」"
-                lst = j.get("data", {}).get("aweme_list") or []
+                lst = _extract_awemes(j)
                 if lst:
                     return True, "ok"
                 return False, f"抖音搜索无结果 (status_code={code})"
@@ -117,15 +235,18 @@ async def probe_remote(plat: str, keyword: str = "测试",
                     "Referer": f"https://www.kuaishou.com/search/video?searchKey={quote(keyword)}",
                     "Cookie": ck,
                 })
-                j = r.json()
-                errs = j.get("errors")
+                try:
+                    j = r.json()
+                except Exception:
+                    return False, f"快手响应不是 JSON (HTTP {r.status_code})"
+                errs = j.get("errors") if isinstance(j, dict) else None
                 if errs:
                     msg = (errs[0] or {}).get("message", "")[:70]
                     return False, f"快手接口报错：{msg}"
-                res = (j.get("data") or {}).get("result")
+                res = (j.get("data") or {}).get("result") if isinstance(j, dict) else None
                 if res == 400002:
                     return False, "快手要求过人机验证（result=400002，滑块）"
-                feeds = (j.get("data") or {}).get("feeds") or []
+                feeds = _extract_feeds(j)
                 if feeds:
                     return True, "ok"
                 return False, f"快手搜索无结果（result={res}）"
