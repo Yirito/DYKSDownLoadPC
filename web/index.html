@@ -21,6 +21,7 @@ input:focus{outline:2px solid #1d9e7566;border-color:#1d9e75}
 .row>div{flex:1;min-width:150px}
 .btn{display:inline-block;padding:10px 18px;border:0;border-radius:9px;background:#1d9e75;
  color:#fff;font:15px inherit;font-weight:500;cursor:pointer}
+.btn.sm{padding:6px 13px;font-size:13px}
 .btn.ghost{background:#fff;color:#22221f;border:.5px solid rgba(0,0,0,.18);font-weight:400}
 .btn:disabled{background:#b9c4bf;cursor:not-allowed}
 .chk{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-top:4px}
@@ -28,11 +29,13 @@ input:focus{outline:2px solid #1d9e7566;border-color:#1d9e75}
 .dirrow{display:flex;gap:8px}
 .dirrow input{flex:1}
 .hint{font-size:12px;color:#8a8a84;margin-top:8px;line-height:1.7}
-.status{display:flex;gap:10px;flex-wrap:wrap}
-.tag{font-size:12px;padding:5px 11px;border-radius:20px;background:#f0f0ec;color:#666}
-.tag.ok{background:#e4f5ee;color:#1a7d5c}
-.tag.bad{background:#fdeceb;color:#b3403a}
-.tag.warn{background:#fdf3e0;color:#9a6b12}
+.status{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.st{display:inline-flex;align-items:center;gap:8px;padding:5px 6px 5px 12px;
+ border-radius:20px;background:#f0f0ec;color:#666;font-size:12px}
+.st.ok{background:#e4f5ee;color:#1a7d5c}
+.st.bad{background:#fdeceb;color:#b3403a}
+.st.warn{background:#fdf3e0;color:#9a6b12}
+.st .btn{padding:3px 11px;font-size:12px;border-radius:14px}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th{text-align:left;color:#78786f;font-weight:400;font-size:12px;padding:6px 4px}
 td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
@@ -50,6 +53,22 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
  border-top-color:#1d9e75;border-radius:50%;animation:sp .7s linear infinite;
  vertical-align:-2px;margin-right:6px}
 @keyframes sp{to{transform:rotate(360deg)}}
+/* 文件夹选择弹层 */
+.mask{position:fixed;inset:0;background:rgba(0,0,0,.32);display:none;
+ align-items:center;justify-content:center;z-index:50}
+.mask.on{display:flex}
+.modal{background:#fff;border-radius:14px;width:min(680px,92vw);max-height:78vh;
+ display:flex;flex-direction:column;overflow:hidden}
+.mhead{padding:14px 16px;border-bottom:.5px solid rgba(0,0,0,.1);display:flex;
+ gap:10px;align-items:center}
+.mhead .cur{flex:1;font-size:13px;color:#555;overflow:hidden;text-overflow:ellipsis;
+ white-space:nowrap}
+.mbody{overflow:auto;padding:6px;flex:1}
+.mbody div{padding:8px 11px;border-radius:8px;cursor:pointer;font-size:14px;
+ white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mbody div:hover{background:#eef6f2}
+.mfoot{padding:12px 16px;border-top:.5px solid rgba(0,0,0,.1);display:flex;gap:10px;
+ justify-content:flex-end}
 </style>
 </head>
 <body>
@@ -72,10 +91,11 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
     <div style="margin-top:14px">
       <label>下载目录</label>
       <div class="dirrow">
-        <input type="text" id="dir" placeholder="默认 ./downloads">
-        <button class="btn ghost" id="pick">浏览…</button>
+        <input type="text" id="dir" placeholder="默认 ~/Downloads/DYKS">
+        <button class="btn ghost" id="pick">选择文件夹…</button>
       </div>
-      <div class="hint">点「开始下载」后会自动建子目录：<b>当天日期_关键字</b>，里面再分<b>抖音</b> / <b>快手</b>两个文件夹。</div>
+      <div class="hint">点「开始下载」后自动建子目录：<b>当天日期_关键字</b>，里面再分<b>抖音</b> / <b>快手</b>两个文件夹。<br>
+        下载目录、条数、画面方向、平台选择都会<b>自动记住</b>（存在 config.json）。</div>
     </div>
 
     <div class="row" style="margin-top:14px">
@@ -104,9 +124,10 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
 
   <div class="card">
     <label>登录 / 验证状态</label>
-    <div class="status" id="status"></div>
+    <div class="status" id="status"><span class="st">检测中…</span></div>
     <div class="hint">抖音搜索需要<b>扫码登录</b>，快手需要过<b>滑块验证</b>（不必登录）。
-      失效会自动弹浏览器重新处理，登录态只存在本机。</div>
+      点「登录」会弹出浏览器，你扫完码 / 拖完滑块关掉窗口即可，状态会自动刷新。<br>
+      <b>下载时不会再自动弹窗</b> —— 没登录的平台会被直接跳过并在这里提示。</div>
   </div>
 
   <div class="card">
@@ -124,9 +145,24 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
   </div>
 </div>
 
+<!-- 文件夹选择弹层 -->
+<div class="mask" id="mask">
+  <div class="modal">
+    <div class="mhead">
+      <button class="btn ghost sm" id="up">⬆ 上一级</button>
+      <div class="cur" id="cur">选择文件夹</div>
+    </div>
+    <div class="mbody" id="dirlist"></div>
+    <div class="mfoot">
+      <button class="btn ghost" id="cancel">取消</button>
+      <button class="btn" id="ok">用这个文件夹</button>
+    </div>
+  </div>
+</div>
+
 <script>
 var $ = function (id) { return document.getElementById(id); };
-var lastLog = 0, lastSig = '';
+var lastLog = -1, lastSig = '', curPath = '';
 
 function fmt(n) {
   n = n || 0;
@@ -138,19 +174,94 @@ function fmt(n) {
 function esc(s) { return String(s||'').replace(/[&<>]/g, function(c){
   return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c]; }); }
 
-function loadStatus() {
-  fetch('/api/status').then(r=>r.json()).then(j=>{
+/* ---------- 配置：读 + 存 ---------- */
+function currentSettings() {
+  var plats = [];
+  if ($('pdy').checked) plats.push('douyin');
+  if ($('pks').checked) plats.push('kuaishou');
+  return { dir: $('dir').value.trim(), count: parseInt($('cnt').value, 10) || 10,
+           orientation: (document.querySelector('input[name=ori]:checked')||{}).value || 'portrait',
+           platforms: plats };
+}
+function applyConfig(c) {
+  if (!c) return;
+  if (c.dir) $('dir').value = c.dir;
+  if (c.count) $('cnt').value = c.count;
+  if (c.orientation) {
+    var r = document.querySelector('input[name=ori][value="' + c.orientation + '"]');
+    if (r) r.checked = true;
+  }
+  if (Array.isArray(c.platforms)) {
+    $('pdy').checked = c.platforms.indexOf('douyin') >= 0;
+    $('pks').checked = c.platforms.indexOf('kuaishou') >= 0;
+  }
+}
+function saveConfig() {
+  fetch('/api/save', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(currentSettings())}).catch(function(){});
+}
+
+/* ---------- 文件夹浏览 ---------- */
+function loadDirs(path) {
+  fetch('/api/dirs?path=' + encodeURIComponent(path || ''))
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      curPath = j.path || '';
+      $('cur').textContent = curPath || '选择一个位置';
+      var html = '';
+      if (j.parent !== null && j.parent !== undefined) {
+        html += '<div data-p="' + esc(j.parent) + '">⬆ ..</div>';
+      }
+      (j.dirs || []).forEach(function(d){
+        html += '<div data-p="' + esc(d.path) + '">📁 ' + esc(d.name) + '</div>';
+      });
+      if (!html) html = '<div style="color:#8a8a84;cursor:default">（没有子文件夹）</div>';
+      $('dirlist').innerHTML = html;
+    });
+}
+$('mask').addEventListener('click', function(e){
+  if (e.target === $('mask')) $('mask').classList.remove('on');
+});
+$('dirlist').addEventListener('click', function(e){
+  var t = e.target.closest('div[data-p]');
+  if (t) loadDirs(t.getAttribute('data-p'));
+});
+$('up').onclick = function(){
+  fetch('/api/dirs?path=' + encodeURIComponent(curPath)).then(function(r){return r.json();})
+    .then(function(j){ if (j.parent) loadDirs(j.parent); else loadDirs(''); });
+};
+$('pick').onclick = function(){ $('mask').classList.add('on'); loadDirs(''); };
+$('cancel').onclick = function(){ $('mask').classList.remove('on'); };
+$('ok').onclick = function(){
+  if (curPath) $('dir').value = curPath;
+  $('mask').classList.remove('on');
+  saveConfig();
+};
+
+/* ---------- 登录状态 + 手动登录 ---------- */
+function loadStatus(force) {
+  fetch('/api/status' + (force ? '?force=1' : '')).then(r=>r.json()).then(function(j){
     $('status').innerHTML = (j.items||[]).map(function(it){
       var cls = it.ok ? 'ok' : (it.local ? 'warn' : 'bad');
       var txt = it.ok ? '✅ 可用' : (it.local ? '⚠ 已失效' : '❌ 未就绪');
-      return '<span class="tag '+cls+'">'+esc(it.name)+' '+txt+'</span>'
-           + '<span class="tag">'+esc(it.why||'')+'</span>';
-    }).join('');
+      var btn = it.ok ? '' :
+        '<button class="btn ' + (it.local ? 'ghost' : '') + '" data-plat="' + it.plat + '">登录</button>';
+      return '<span class="st ' + cls + '">' + esc(it.name) + ' ' + txt +
+             '<span style="opacity:.8">' + esc(it.why||'') + '</span>' + btn + '</span>';
+    }).join('') || '<span class="st">检测中…</span>';
   }).catch(function(){});
 }
+$('status').addEventListener('click', function(e){
+  var b = e.target.closest('button[data-plat]');
+  if (!b) return;
+  b.disabled = true; b.textContent = '打开中…';
+  fetch('/api/prepare', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({plat: b.getAttribute('data-plat')})})
+    .then(function(){ setTimeout(function(){ loadStatus(true); }, 4000); });
+});
 
+/* ---------- 进度 / 日志 ---------- */
 function render(st) {
-  // 日志
   if ((st.log||[]).length !== lastLog) {
     var box = $('log'), html = '';
     (st.log||[]).slice(-200).forEach(function(l){
@@ -161,11 +272,10 @@ function render(st) {
     box.scrollTop = box.scrollHeight;
     lastLog = (st.log||[]).length;
   }
-  // 阶段
-  $('phase').innerHTML = st.running ? '<span class="spin"></span>' + esc(st.phase||'处理中') : (esc(st.phase||''));
+  $('phase').innerHTML = st.running ? '<span class="spin"></span>' + esc(st.phase||'处理中')
+                                   : (esc(st.phase||''));
   $('start').disabled = !!st.running;
   $('start').textContent = st.running ? '下载中…' : '开始下载';
-  // 列表
   var tb = $('items'), its = st.items||[];
   if (!its.length) { tb.innerHTML = '<tr><td colspan="6" style="color:#8a8a84">还没有任务</td></tr>'; return; }
   var sig = JSON.stringify(its);
@@ -185,33 +295,31 @@ function render(st) {
       + '<td>'+stt+'</td></tr>';
   }).join('');
 }
-
 function poll() {
   fetch('/api/state').then(r=>r.json()).then(render).catch(function(){});
 }
 
-$('pick').onclick = function () {
-  this.disabled = true; this.textContent = '选择中…';
-  fetch('/api/pickdir').then(r=>r.json()).then(j=>{
-    if (j.dir) $('dir').value = j.dir;
-  }).finally(function(){ $('pick').disabled=false; $('pick').textContent='浏览…'; });
-};
-
+/* ---------- 启动 ---------- */
 $('start').onclick = function () {
-  var plats = [];
-  if ($('pdy').checked) plats.push('douyin');
-  if ($('pks').checked) plats.push('kuaishou');
-  if (!plats.length) { alert('至少选一个平台'); return; }
-  var ori = document.querySelector('input[name=ori]:checked').value;
+  var s = currentSettings();
+  if (!s.platforms.length) { alert('至少选一个平台'); return; }
+  if (!$('kw').value.trim()) { alert('请填关键字'); return; }
   fetch('/api/start', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({keyword:$('kw').value, dir:$('dir').value,
-                          count:$('cnt').value, orientation:ori, platforms:plats})})
-  .then(r=>r.json()).then(j=>{ if(!j.ok) alert(j.msg||'启动失败'); });
+    body: JSON.stringify({keyword: $('kw').value, dir: s.dir, count: s.count,
+                          orientation: s.orientation, platforms: s.platforms})})
+  .then(function(r){return r.json();}).then(function(j){ if(!j.ok) alert(j.msg||'启动失败'); });
 };
+['dir','cnt','pdy','pks'].forEach(function(id){
+  $(id).addEventListener('change', saveConfig);
+});
+document.querySelectorAll('input[name=ori]').forEach(function(r){
+  r.addEventListener('change', saveConfig);
+});
 
-setInterval(poll, 800);
-setInterval(loadStatus, 4000);
-poll(); loadStatus();
+fetch('/api/config').then(r=>r.json()).then(applyConfig).catch(function(){});
+setInterval(poll, 1000);
+setInterval(function(){ loadStatus(false); }, 15000);
+poll(); loadStatus(true);
 </script>
 </body>
 </html>

@@ -28,13 +28,25 @@ import search as search_mod  # noqa: E402
 from download import download, safe_name, unique_path  # noqa: E402
 
 WEB_DIR = HERE / "web"
+CONFIG_FILE = HERE / "config.json"
 PLAT_DIR = {"douyin": "抖音", "kuaishou": "快手"}
 PLAT_NAME = {"douyin": "抖音", "kuaishou": "快手"}
+DEFAULT_CONFIG = {
+    "dir": "",
+    "count": 10,
+    "orientation": "portrait",
+    "platforms": ["douyin", "kuaishou"],
+}
 
 # 任务状态（单任务，够用）
 JOB: dict = {"running": False, "phase": "", "log": [], "items": [],
              "out_root": "", "done": 0, "total": 0, "error": ""}
 _lock = threading.Lock()
+
+# ── 登录/验证状态缓存（避免每次刷新都真发网络请求，把机器打爆）──
+STATUS_CACHE: dict = {"items": [], "at": 0.0}
+STATUS_TTL = 30.0          # 30 秒内复用缓存
+_status_thread = None
 
 
 def today_cn() -> str:
@@ -58,11 +70,120 @@ def set_item(idx: int, **kw) -> None:
         JOB["items"].append({"i": idx, **kw})
 
 
+# ------------------------------------------------------------------ 配置持久化
+
+def load_config() -> dict:
+    cfg = dict(DEFAULT_CONFIG)
+    try:
+        if CONFIG_FILE.exists():
+            cfg.update(json.loads(CONFIG_FILE.read_text(encoding="utf-8")))
+    except Exception:
+        pass
+    if not cfg.get("dir"):
+        cfg["dir"] = str(Path.home() / "Downloads" / "DYKS")
+    return cfg
+
+
+def save_config(cfg: dict) -> dict:
+    """只保存白名单字段，避免脏数据进配置文件。"""
+    out = {
+        "dir": str(cfg.get("dir") or ""),
+        "count": int(cfg.get("count") or 10),
+        "orientation": cfg.get("orientation") or "portrait",
+        "platforms": [p for p in (cfg.get("platforms") or []) if p in PLAT_DIR],
+    }
+    try:
+        CONFIG_FILE.write_text(json.dumps(out, ensure_ascii=False, indent=2),
+                               encoding="utf-8")
+    except Exception:
+        pass
+    return out
+
+
+# ------------------------------------------------------------------ 目录浏览
+
+def list_dirs(path: str) -> dict:
+    """列出子目录；path 为空时列出盘符 + 常用位置。"""
+    if not path:
+        out = []
+        if os.name == "nt":
+            for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+                d = f"{letter}:\\"
+                if os.path.exists(d):
+                    out.append({"name": d, "path": d})
+        for extra in [str(Path.home()), str(Path.home() / "Downloads"),
+                      str(Path.home() / "Desktop"), str(Path.home() / "Videos"),
+                      str(Path.cwd())]:
+            if os.path.isdir(extra):
+                out.append({"name": Path(extra).name or extra, "path": extra})
+        return {"path": "", "parent": None, "dirs": out}
+    p = Path(path)
+    if not p.is_dir():
+        return {"path": path, "parent": None, "dirs": [], "error": "路径不存在"}
+    parent = str(p.parent) if p.parent != p else None
+    out = []
+    try:
+        for c in sorted(p.iterdir(), key=lambda x: x.name.lower()):
+            if c.is_dir() and not c.name.startswith("."):
+                out.append({"name": c.name, "path": str(c)})
+    except PermissionError:
+        pass
+    return {"path": str(p), "parent": parent, "dirs": out}
+
+
+# ------------------------------------------------------------------ 状态探测（带缓存）
+
+def probe_sync(plat: str):
+    try:
+        return asyncio.run(auth.probe_remote(plat))
+    except Exception as e:
+        return False, str(e)[:80]
+
+
+def refresh_status_async():
+    """后台线程：真去探测两平台状态，结果写进缓存。"""
+    global _status_thread
+    with _lock:
+        if _status_thread and _status_thread.is_alive():
+            return
+        _status_thread = threading.Thread(target=_refresh_status_worker, daemon=True)
+        _status_thread.start()
+
+
+def _refresh_status_worker():
+    out = []
+    for plat in ("douyin", "kuaishou"):
+        ok, why = probe_sync(plat)
+        out.append({"plat": plat, "name": PLAT_NAME[plat], "ok": ok, "why": why,
+                    "local": auth.has_local_auth(plat)})
+    with _lock:
+        STATUS_CACHE["items"] = out
+        STATUS_CACHE["at"] = time.time()
+
+
+def get_status(force: bool = False) -> list:
+    """拿状态；缓存过期就异步刷新一次，先返回旧的（不阻塞请求）。"""
+    with _lock:
+        fresh = (time.time() - STATUS_CACHE["at"]) < STATUS_TTL
+        items = list(STATUS_CACHE["items"])
+    if force or not fresh:
+        refresh_status_async()
+    if not items:
+        _refresh_status_worker()          # 第一次：同步探一次
+        with _lock:
+            items = list(STATUS_CACHE["items"])
+    return items
+
+
 # ------------------------------------------------------------------ 后台任务
 
 async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
                   plats: tuple[str, ...]) -> None:
-    """搜索 + 下载，全程把进度写进 JOB。"""
+    """搜索 + 下载，全程把进度写进 JOB。
+
+    ★ 不再自动弹浏览器要求登录 —— 登录由界面上的「登录」按钮手动触发，
+      这里发现没登录就跳过该平台并提示。
+    """
     out_root = dl_dir / f"{today_cn()}_{safe_name(keyword, 40)}"
     for p in plats:
         (out_root / PLAT_DIR[p]).mkdir(parents=True, exist_ok=True)
@@ -73,43 +194,31 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
 
     idx = 0
     for plat in plats:
-        # ① 检查登录/验证
-        ok, why = await auth.probe_remote(plat, keyword)
+        # ⚠️ 这里本身就在事件循环里，必须直接 await，不能用 asyncio.run()
+        try:
+            ok, why = await auth.probe_remote(plat)
+        except Exception as e:
+            ok, why = False, f"探测异常：{str(e)[:80]}"
         if not ok:
-            logline(f"{PLAT_NAME[plat]} 需要登录/验证：{why}", "warn")
-            set_item(idx, plat=plat, name="（需要登录/验证）", state="need_auth",
-                     pct=0, size=0, wh="")
+            logline(f"{PLAT_NAME[plat]} 未就绪（{why}）→ 跳过。"
+                    f"请在「登录 / 验证状态」里点该平台的「登录」按钮处理后再下载。", "warn")
+            set_item(idx, plat=plat, name=f"（{PLAT_NAME[plat]}未就绪：{why}）",
+                     state="need_auth", pct=0, size=0, wh="")
             idx += 1
-            with _lock:
-                JOB["phase"] = f"等待 {PLAT_NAME[plat]} 登录/验证"
-            logline(f"⚠ 请在弹出的浏览器里完成"
-                    f"{'扫码登录' if plat == 'douyin' else '滑块验证'}，完成后本窗口会自动继续…")
-            done = await auth.prepare(plat)
-            ok, why = await auth.probe_remote(plat, keyword)
-            if not done or not ok:
-                logline(f"{PLAT_NAME[plat]} 仍未就绪（{why}），跳过", "err")
-                set_item(idx, plat=plat, name="（未就绪）", state="failed", pct=0,
-                         size=0, wh="")
-                idx += 1
-                continue
+            continue
 
-        # ② 搜索
         with _lock:
             JOB["phase"] = f"搜索 {PLAT_NAME[plat]}"
         logline(f"正在搜索 {PLAT_NAME[plat]}：{keyword}")
         try:
             items = await search_mod.search(plat, keyword, limit=count * 3)
         except auth.AuthExpired as e:
-            logline(f"{e}，重新打开浏览器…", "warn")
-            await auth.prepare(plat)
-            try:
-                items = await search_mod.search(plat, keyword, limit=count * 3)
-            except Exception as e2:
-                logline(f"{PLAT_NAME[plat]} 搜索失败：{str(e2)[:100]}", "err")
-                set_item(idx, plat=plat, name="（搜索失败）", state="failed",
-                         pct=0, size=0, wh="")
-                idx += 1
-                continue
+            logline(f"{e}", "warn")
+            logline(f"请点上方「登录」按钮处理 {PLAT_NAME[plat]}，再重新下载。", "warn")
+            set_item(idx, plat=plat, name="（需要登录/验证）", state="need_auth",
+                     pct=0, size=0, wh="")
+            idx += 1
+            continue
         except Exception as e:
             logline(f"{PLAT_NAME[plat]} 搜索失败：{str(e)[:120]}", "err")
             set_item(idx, plat=plat, name="（搜索失败）", state="failed", pct=0,
@@ -133,7 +242,6 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
         picked = picked[:count]
         logline(f"{PLAT_NAME[plat]} 命中 {len(items)} 条，选中 {len(picked)} 条")
 
-        # ③ 下载
         folder = out_root / PLAT_DIR[plat]
         for it in picked:
             idx += 1
@@ -172,8 +280,9 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "DYKS/1.0"
+    protocol_version = "HTTP/1.1"
 
-    def log_message(self, *a):        # 静音默认日志
+    def log_message(self, *a):
         pass
 
     def _send(self, code: int, body: bytes, ctype="application/json; charset=utf-8"):
@@ -191,7 +300,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"))
 
     def do_GET(self):
-        p = urlparse(self.path).path
+        u = urlparse(self.path)
+        p = u.path
+        qs = parse_qs(u.query)
         if p in ("/", "/index.html"):
             f = WEB_DIR / "index.html"
             if not f.exists():
@@ -203,17 +314,16 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 self._json(dict(JOB))
             return
-        if p == "/api/status":
-            out = []
-            for plat in ("douyin", "kuaishou"):
-                ok, why = probe_sync(plat)
-                out.append({"plat": plat, "name": PLAT_NAME[plat], "ok": ok,
-                            "why": why, "local": auth.has_local_auth(plat)})
-            self._json({"items": out})
+        if p == "/api/config":
+            self._json(load_config())
             return
-        if p == "/api/pickdir":
-            path = pick_dir()
-            self._json({"dir": path})
+        if p == "/api/status":
+            force = (qs.get("force") or ["0"])[0] in ("1", "true")
+            self._json({"items": get_status(force)})
+            return
+        if p == "/api/dirs":
+            path = (qs.get("path") or [""])[0]
+            self._json(list_dirs(path))
             return
         self._send(404, b"{}")
 
@@ -237,6 +347,8 @@ class Handler(BaseHTTPRequestHandler):
             count = max(1, int(body.get("count") or 10))
             orient = body.get("orientation") or "portrait"
             plats = tuple(body.get("platforms") or ("douyin", "kuaishou"))
+            save_config({"dir": str(dl), "count": count, "orientation": orient,
+                         "platforms": list(plats)})
             th = threading.Thread(target=lambda: asyncio.run(
                 run_job(keyword, dl, count, orient, plats)), daemon=True)
             th.start()
@@ -244,36 +356,25 @@ class Handler(BaseHTTPRequestHandler):
             return
         if p == "/api/prepare":
             plat = body.get("plat") or "douyin"
-            threading.Thread(target=lambda: asyncio.run(
-                auth.prepare(plat)), daemon=True).start()
+            if plat not in PLAT_DIR:
+                self._json({"ok": False, "msg": "平台不对"})
+                return
+            logline(f"正在打开浏览器，请完成【{PLAT_NAME[plat]}的"
+                    f"{'扫码登录' if plat == 'douyin' else '滑块验证'}】…")
+
+            def _do():
+                try:
+                    asyncio.run(auth.prepare(plat))
+                finally:
+                    refresh_status_async()
+
+            threading.Thread(target=_do, daemon=True).start()
             self._json({"ok": True})
             return
+        if p == "/api/save":
+            self._json({"ok": True, "config": save_config(body)})
+            return
         self._send(404, b"{}")
-
-
-def probe_sync(plat: str):
-    """在同步 handler 里跑一次异步探测（每次用独立的事件循环）。"""
-    try:
-        return asyncio.run(auth.probe_remote(plat))
-    except Exception as e:
-        return False, str(e)[:80]
-
-
-def pick_dir() -> str:
-    """Windows 上弹原生目录选择框（跨平台就退回输入框）。"""
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        d = filedialog.askdirectory(title="选择下载目录")
-        root.destroy()
-        if d:
-            return d
-    except Exception:
-        pass
-    return ""
 
 
 def main():
@@ -281,14 +382,23 @@ def main():
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--no-browser", action="store_true")
-    ap.add_argument("--dir", default=str(Path.cwd() / "downloads"))
     args = ap.parse_args()
 
-    srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    cfg = load_config()
+    class Server(ThreadingHTTPServer):
+        # ★ 防卡死：连接线程设为 daemon（关窗口即退出），
+        #   并限制单连接存活时间，避免 keep-alive 连接堆积占满线程
+        daemon_threads = True
+        allow_reuse_address = True
+
+    Handler.timeout = 30          # 单连接最长存活 30 秒
+    srv = Server((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}/"
     print(f"▶ DYKSDownLoadPC 可视化界面：{url}")
-    print(f"  默认下载目录：{args.dir}")
+    print(f"  下载目录：{cfg['dir']}")
+    print(f"  配置文件：{CONFIG_FILE}")
     print("  关闭这个黑窗口即停止服务")
+    refresh_status_async()
     if not args.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     try:
