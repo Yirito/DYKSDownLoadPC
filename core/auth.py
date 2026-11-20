@@ -358,6 +358,35 @@ async def _open_ctx(pw, plat: str, prof: str, headless: bool):
         viewport={"width": 1440, "height": 900}, locale="zh-CN", user_agent=UA_DESKTOP)
 
 
+async def check_auth_in_browser(plat: str) -> tuple[bool, str]:
+    """用【浏览器里的真实 cookie】检查登录/验证状态。
+
+    ★ 为什么必须走浏览器：Chrome 在磁盘上把 cookie【值】加密了，
+      直接读 SQLite 拿到的 sessionid 是空串 → 请求发出去还是 2483，
+      状态栏就会误报「未就绪」（实测登录了也报没登录）。
+      浏览器能自动解密，拿到的是真实会话。
+    """
+    from playwright.async_api import async_playwright
+    prof = _pick_profile("dy" if plat == "douyin" else "ks")
+    async with async_playwright() as pw:
+        ctx = await _open_ctx(pw, plat, prof, headless=True)
+        try:
+            page = await ctx.new_page()
+            await page.goto(_home_url(plat), wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(4000)
+            ck = {c["name"]: c["value"] for c in await ctx.cookies()}
+            header = "; ".join(f"{k}={v}" for k, v in ck.items() if v)
+            return await check_auth(plat, cookie_header=header)
+        except Exception as e:
+            return False, f"浏览器探测异常：{str(e)[:80]}"
+        finally:
+            try:
+                await ctx.close()
+            except Exception:
+                pass
+            _release_profile(prof)
+
+
 async def prepare(plat: str, timeout: int = 300, keyword: str = "测试") -> bool:
     """确保该平台处于【已登录 / 已过验证】状态。
 
@@ -374,26 +403,11 @@ async def prepare(plat: str, timeout: int = 300, keyword: str = "测试") -> boo
     prof = _pick_profile("dy" if plat == "douyin" else "ks")
 
     # ── ① 先快速检查（无头，不打扰用户）──
-    async with async_playwright() as pw:
-        ctx = await _open_ctx(pw, plat, prof, headless=True)
-        try:
-            page = await ctx.new_page()
-            await page.goto(_home_url(plat), wait_until="domcontentloaded", timeout=45000)
-            await page.wait_for_timeout(4000)
-            ck = {c["name"]: c["value"] for c in await ctx.cookies()}
-            header = "; ".join(f"{k}={v}" for k, v in ck.items() if v)
-            ok, why = await check_auth(plat, cookie_header=header)
-            if ok:
-                print(f"  ✅ {PLAT_NAME[plat]} 已登录，无需重复登录（{why}）")
-                return True
-        except Exception:
-            pass
-        finally:
-            try:
-                await ctx.close()
-            except Exception:
-                pass
-            _release_profile(prof)
+    ok, why = await check_auth_in_browser(plat)
+    if ok:
+        print(f"  ✅ {PLAT_NAME[plat]} 已登录，无需重复登录（{why}）")
+        return True
+    _release_profile(prof)
 
     # ── ② 没登录 → 弹有头窗口 ──
     prof = _pick_profile("dy" if plat == "douyin" else "ks")

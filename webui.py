@@ -45,7 +45,7 @@ _lock = threading.Lock()
 
 # ── 登录/验证状态缓存（避免每次刷新都真发网络请求，把机器打爆）──
 STATUS_CACHE: dict = {"items": [], "at": 0.0}
-STATUS_TTL = 30.0          # 30 秒内复用缓存
+STATUS_TTL = 90.0          # 90 秒内复用缓存（每次探测要开一次浏览器）
 _status_thread = None
 
 
@@ -173,9 +173,9 @@ def probe_sync(plat: str):
 
 
 def check_sync(plat: str):
-    """登录/验证状态（不看有没有搜索结果）。"""
+    """登录/验证状态 —— 必须走浏览器拿真实 cookie（磁盘上的值是加密的）。"""
     try:
-        return asyncio.run(auth.check_auth(plat))
+        return asyncio.run(auth.check_auth_in_browser(plat))
     except Exception as e:
         return False, str(e)[:80]
 
@@ -194,7 +194,10 @@ def _refresh_status_worker():
     out = []
     for plat in ("douyin", "kuaishou"):
         # ★ 用 check_auth（只看登录/验证状态），不要用「必须搜到结果」当标准
-        ok, why = check_sync(plat)
+        try:
+            ok, why = check_sync(plat)
+        except Exception as e:
+            ok, why = False, f"探测异常：{type(e).__name__}: {str(e)[:80]}"
         out.append({"plat": plat, "name": PLAT_NAME[plat], "ok": ok, "why": why,
                     "local": auth.has_local_auth(plat)})
     with _lock:
@@ -203,16 +206,23 @@ def _refresh_status_worker():
 
 
 def get_status(force: bool = False) -> list:
-    """拿状态；缓存过期就异步刷新一次，先返回旧的（不阻塞请求）。"""
+    """拿状态；缓存过期就异步刷新一次，先返回旧的（不阻塞请求）。
+
+    ★ 关键：探测【不能并发】—— 两个浏览器同时开同一个 profile，
+      后启动的那个会因 profile 被占用而失败，
+      失败结果会把缓存覆盖成「未就绪」（明明登录了也报没登录）。
+    """
     with _lock:
         fresh = (time.time() - STATUS_CACHE["at"]) < STATUS_TTL
         items = list(STATUS_CACHE["items"])
-    if force or not fresh:
+        probing = bool(_status_thread and _status_thread.is_alive())
+    if (force or not fresh) and not probing:
         refresh_status_async()
-    if not items:
-        _refresh_status_worker()          # 第一次：同步探一次
-        with _lock:
-            items = list(STATUS_CACHE["items"])
+    if not items and not probing:
+        _refresh_status_worker()          # 首屏：同步探一次
+    # ★ 刷新完必须重新读一次缓存 —— 否则返回的还是刷新【之前】的旧值
+    with _lock:
+        items = list(STATUS_CACHE["items"])
     return items
 
 
@@ -437,6 +447,19 @@ def main():
         allow_reuse_address = True
 
     Handler.timeout = 30          # 单连接最长存活 30 秒
+    # ★ 端口被占用时【直接报错退出】，不要闷头起一个连不上的服务
+    #   （曾因为残留进程占着端口，导致改了代码也不生效、状态显示还是旧的）
+    import socket
+    _probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        _probe.settimeout(1)
+        if _probe.connect_ex((args.host, args.port)) == 0:
+            print(f"\n❌ 端口 {args.port} 已被占用！")
+            print(f"   可能上一次的进程还没退。先关掉那个黑窗口，")
+            print(f"   或者换个端口：python webui.py --port 8791")
+            sys.exit(1)
+    finally:
+        _probe.close()
     srv = Server((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}/"
     print(f"▶ DYKSDownLoadPC 可视化界面：{url}")
