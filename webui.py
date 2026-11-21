@@ -108,49 +108,32 @@ def save_config(cfg: dict) -> dict:
 def pick_directory(initial: str = "") -> str:
     """弹 Windows 原生「浏览文件夹」对话框，返回选中的目录（取消返回 ""）。
 
-    ★ 用 System.Windows.Forms.FolderBrowserDialog：
-      标准托管 UI、自带消息泵，本地桌面必弹
-      （比 ctypes 直调 SHBrowseForFolder 稳，后者在非 UI 线程里常静默返回 None）。
-    ★ 关键：必须【置顶】。原来的写法弹出来的窗体可能压在浏览器窗口底下，
-      用户根本看不见 → 反馈就是「点不了」。
-      做法：建一个 TopMost 的空 Form 当父窗体，把对话框挂上去。
-    ★ 脚本走 -EncodedCommand（base64 UTF-16LE），彻底避免 shell 字符串解析问题。
+    ★ 做法和「一键签到」看板完全一致（那边实测好用）：
+      · System.Windows.Forms.FolderBrowserDialog
+      · ShowDialog() 不传 owner → 【只弹一个窗口】
+      · powershell -STA（WinForms 模态必需）
+      · CREATE_NO_WINDOW（不闪黑框）
+      · 脚本走 -EncodedCommand（base64 UTF-16LE）避免 shell 转义问题
+
+    ★★ 别再加什么 TopMost 父窗体：模态对话框本来就会自己置顶，
+       多加那个 Form 反而会抢焦点、把对话框挤到浏览器后面去，
+       还会多弹一个空白窗口（用户反馈过）。
     """
     import base64
     import subprocess
     try:
         ps = ("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;"
               "Add-Type -AssemblyName System.Windows.Forms;"
-              # ★ 这个 Form 只是用来当「置顶父窗体」的，必须【完全不可见】：
-              #   移到屏幕外 + 1x1 像素 + 全透明，用户看不见它，
-              #   但它 TopMost，对话框就会跟着被顶到最前。
-              "$f = New-Object System.Windows.Forms.Form;"
-              "$f.TopMost = $true;"
-              "$f.ShowInTaskbar = $false;"
-              "$f.StartPosition = 'Manual';"
-              # 放在屏幕中心（1x1 全透明 → 看不见），对话框会以它为父窗体居中显示
-              "$wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea;"
-              "$f.Location = New-Object System.Drawing.Point("
-              "  [int]($wa.Width/2), [int]($wa.Height/2));"
-              "$f.Size = New-Object System.Drawing.Size(1,1);"
-              "$f.Opacity = 0;"
-              "$f.Show();"
-              "$f.Activate();"
-              "$f.BringToFront();"
-              "[System.Windows.Forms.SendKeys]::SendWait('%');"
-              "Start-Sleep -Milliseconds 300;"
-              "$f.Activate();"
               "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
               "$d.Description = '选择下载目录';"
               "$d.ShowNewFolderButton = $true;")
         if initial and os.path.isdir(initial):
             ps += "$d.SelectedPath = '%s';" % initial.replace("'", "''")
-        ps += ("if ($d.ShowDialog($f) -eq 'OK') { $d.SelectedPath }"
-               " $f.Close()")
+        ps += "if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath }"
         enc = base64.b64encode(ps.encode("utf-16-le")).decode("ascii")
         proc = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", enc],
-            capture_output=True, timeout=180, encoding="utf-8", errors="replace",
+            capture_output=True, timeout=120, encoding="utf-8", errors="replace",
             creationflags=0x08000000)          # CREATE_NO_WINDOW：不闪黑框
         line = (proc.stdout or "").strip()
         if line and ("\\" in line or line.startswith("/")):

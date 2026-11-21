@@ -1,0 +1,16 @@
+fix: 选择文件夹完全照搬「一键签到」看板的做法，去掉多余的置顶 Form
+
+★ 之前自作聪明加了个 TopMost 父窗体来置顶 → 结果：
+  ① 多弹一个空白窗口（用户截图骂人）
+  ② 那个 Form 抢了焦点，把对话框挤到浏览器【后面】去
+  ③ 反而把「弹到最前」这件事搞砸了
+
+★ 正确做法（参考 WBSafe/wb_guard.py 的 _pick_directory，实测好用）：
+  · System.Windows.Forms.FolderBrowserDialog
+  · ShowDialog() 不传 owner → 只弹【一个】窗口
+  · 命令行加 -STA（WinForms 模态必需）
+  · CREATE_NO_WINDOW 不闪黑框
+  · 脚本走 -EncodedCommand（base64 UTF-16LE）避免 shell 转义
+  模态对话框本身就会激活置顶，不需要任何额外花招。
+
+实测：对话框正常开着等用户选，只有一个窗口。
