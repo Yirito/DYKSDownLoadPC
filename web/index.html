@@ -97,7 +97,6 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
       不要配音、不要字幕、片段默认无音频。草稿直接落到剪映草稿目录，打开剪映就能看到。
     </div>
     <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-      <button class="btn ghost" id="scanClip">🔍 扫描文件夹</button>
       <button class="btn" id="mkDraft" disabled>🎬 生成剪映草稿</button>
       <span id="clipCount" style="font-size:12px;color:#8a8a84"></span>
     </div>
@@ -345,23 +344,6 @@ function clipPlats() {
   return p;
 }
 
-/* 扫描下载文件夹里有多少视频 */
-$('scanClip').onclick = function () {
-  var b = this;
-  b.disabled = true; b.textContent = '扫描中…';
-  fetch('/api/clip/scan', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({dir: $('clipDir').value.trim() || $('dir').value.trim(),
-                          plats: clipPlats()})})
-    .then(function(r){return r.json();})
-    .then(function(j){
-      $('clipCount').innerHTML = '📂 扫到 <b>' + (j.douyin||0) + '</b> 个抖音 · <b>'
-        + (j.kuaishou||0) + '</b> 个快手，合计 <b>' + (j.total||0) + '</b> 个视频';
-      $('mkDraft').disabled = !(j.total > 0);
-    })
-    .catch(function(){ $('clipCount').textContent = '扫描失败'; })
-    .finally(function(){ b.disabled = false; b.textContent = '🔍 扫描文件夹'; });
-};
-
 /* 生成剪映草稿 */
 $('mkDraft').onclick = function () {
   var b = this;
@@ -448,8 +430,11 @@ refreshBrowserHint();
 /* 剪映剪辑开关：启用后放开选项区 */
 function syncClipBox() {
   var on = $('clipEnabled').checked;
-  $('clipBox').style.opacity = on ? '1' : '.45';
-  $('clipBox').style.pointerEvents = on ? 'auto' : 'none';
+  var cb = $('clipBox');
+  if (cb) {
+    cb.style.opacity = on ? '1' : '.45';
+    cb.style.pointerEvents = on ? 'auto' : 'none';
+  }
 }
 $('clipEnabled').addEventListener('change', function(){ syncClipBox(); });
 ['clipDur','clipOrientation'].forEach(function(){});
@@ -537,13 +522,18 @@ function render(st) {
   }
   $('phase').innerHTML = st.running ? '<span class="spin"></span>' + esc(st.phase||'处理中')
                                    : (esc(st.phase||''));
-  /* 剪映草稿：待选段数量 + 生成按钮 + 草稿路径 */
+  /* 剪映草稿：下载完成后自动点亮「生成剪映草稿」 */
   var pending = st.pending_clips || 0;
+  var ready = st.clip_ready || pending > 0;
   var mb = $('mkDraft');
   if (mb) {
-    mb.disabled = !(pending > 0);
+    mb.disabled = !ready;
     mb.textContent = pending > 0 ? ('🎬 生成剪映草稿（' + pending + ' 个待选段）')
                                   : '🎬 生成剪映草稿';
+  }
+  var cc = $('clipCount');
+  if (cc && st.clip_out) {
+    cc.innerHTML = '📂 素材目录：<b>' + esc(st.clip_out) + '</b>';
   }
   if (st.draft_root && $('draftInfo').getAttribute('data-d') !== st.draft_root) {
     $('draftInfo').setAttribute('data-d', st.draft_root);

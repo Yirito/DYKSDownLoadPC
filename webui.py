@@ -308,6 +308,10 @@ def get_status(force: bool = False) -> list:
 # ------------------------------------------------------------------ 后台任务
 
 ORDER_NAME = {"like": "点赞多", "comment": "评论多", "newest": "最新", "default": "默认"}
+# ★ 搜索阶段串行锁：两个无头浏览器同时跑会互相抢 CPU
+#   （实测抖音「没搜到结果」、快手误报 400002）
+#   下载是纯 HTTP，不占浏览器 → 下载阶段不持这个锁，可以重叠
+_search_lock = asyncio.Lock()
 
 
 async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
@@ -344,47 +348,61 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
     idx = 0
     done_videos: list[Path] = []
     failed_plats: set = set()      # 没下到的平台（未登录/没搜到）
-    for plat in plats:
+    idx_lock = asyncio.Lock()      # 进度表下标分配要串行
+
+    async def _plat_task(plat: str):
+        """一个平台的完整流程：搜索 → 筛选 → 逐个下载。
+
+        ★★★ 【流水线】—— 用户要求「先搜抖音慢慢下载再搜快手」：
+          · 搜索阶段用 _search_lock 串行（两个无头浏览器同时跑会互相抢
+            CPU，抖音会「没搜到结果」、快手会误报 400002）
+          · 下载阶段【不持锁】—— 下载是纯 HTTP（不占浏览器），
+            所以可以跟另一个平台的搜索重叠
+          ⇒ 实际时序：搜抖音(6s) → 抖音开下 + 后台搜快手 → 两边同时下
+        """
+        nonlocal idx
         with _lock:
             JOB["phase"] = f"搜索 {PLAT_NAME[plat]}"
         logline(f"正在搜索 {PLAT_NAME[plat]}：{keyword}")
-        try:
-            # ★ limit 别贪多：第一页通常就有 10 条，要太多就得一直滚动等分页
-            #   （搜索慢的大头）。留一点余量给竖屏过滤就够了。
-            items = await search_mod.search(
-                plat, keyword, limit=max(count + 5, count * 2))
-            err = None
-        except auth.AuthExpired as e:
-            items, err = [], e
-        except Exception as e:
-            items, err = [], e
-        # ★ 不再【预先探测登录态】—— 预检查会误判（探测口径和搜索口径不一致，
-        #   于是出现「状态栏说可用、下载却提示待登录」）。
-        #   直接开搜：搜索接口自己会告诉我们要不要登录/验证（AuthExpired），
-        #   搜得到就是搜得到，搜不到就如实说「没搜到结果」。
+        async with _search_lock:
+            try:
+                # ★ limit 别贪多：第一页通常就有 10 条，要太多就得一直
+                #   滚动等分页（搜索慢的大头）。留一点余量给竖屏过滤就够。
+                items = await search_mod.search(
+                    plat, keyword, limit=max(count + 5, count * 2))
+                err = None
+            except auth.AuthExpired as e:
+                items, err = [], e
+            except Exception as e:
+                items, err = [], e
+        # ★ 不预先探测登录态（探测口径 ≠ 搜索口径，会误判）。
+        #   搜索接口自己会告诉我们要不要登录/验证（AuthExpired）。
         if isinstance(err, auth.AuthExpired):
             logline(f"{err}", "warn")
             logline(f"请点上方「{PLAT_NAME[plat]}」的「登录」按钮处理，"
                     f"再重新下载。", "warn")
-            set_item(idx, plat=plat, name="（需要登录/验证）", state="need_auth",
-                     pct=0, size=0, wh="")
-            idx += 1
+            async with idx_lock:
+                set_item(idx, plat=plat, name="（需要登录/验证）",
+                         state="need_auth", pct=0, size=0, wh="")
+                idx += 1
             failed_plats.add(plat)
-            continue
+            return
         if err is not None:
             logline(f"{PLAT_NAME[plat]} 搜索失败：{str(err)[:120]}", "err")
-            set_item(idx, plat=plat, name="（搜索失败）", state="failed", pct=0,
-                     size=0, wh="")
-            idx += 1
-            continue
-
+            async with idx_lock:
+                set_item(idx, plat=plat, name="（搜索失败）", state="failed",
+                         pct=0, size=0, wh="")
+                idx += 1
+            failed_plats.add(plat)
+            return
         if not items:
             logline(f"{PLAT_NAME[plat]} 没搜到结果", "warn")
-            set_item(idx, plat=plat, name="（无结果）", state="failed", pct=0,
-                     size=0, wh="")
-            idx += 1
+            async with idx_lock:
+                set_item(idx, plat=plat, name="（无结果）", state="failed",
+                         pct=0, size=0, wh="")
+                idx += 1
             failed_plats.add(plat)
-            continue
+            return
 
         if orient == "portrait":
             picked = [i for i in items if i.portrait or not (i.width and i.height)]
@@ -409,8 +427,9 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
 
         folder = out_root / PLAT_DIR[plat]
         for it in picked:
-            idx += 1
-            my = idx
+            async with idx_lock:
+                my = idx
+                idx += 1
             wh = f"{it.width}×{it.height}" if it.width else ""
             set_item(my, plat=plat, name=it.title[:60] or it.video_id, wh=wh,
                      size=it.bytes, pct=0, state="downloading")
@@ -426,14 +445,14 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
 
             good, msg = await download(plat, it.play_url, dest, on_progress=cb)
             if not good:
-                # ★ 失败重试一次（CDN 偶尔抽风），并在日志里写明原因
+                # ★ 失败重试一次（CDN 偶尔抽风），并写明原因
                 logline(f"⚠ {it.title[:26]} 下载失败（{msg}），重试一次…", "warn")
                 await asyncio.sleep(2)
                 good, msg = await download(plat, it.play_url, dest, on_progress=cb)
             real_size = dest.stat().st_size if dest.exists() else 0
             set_item(my, state="done" if good else "failed",
                      pct=100 if good else 0,
-                     size=real_size or it.bytes,     # ★ 用实际落盘大小（搜索响应里没有 size）
+                     size=real_size or it.bytes,   # ★ 用实际落盘大小
                      path=str(dest) if good else "", note=msg)
             if good:
                 with _lock:
@@ -442,6 +461,15 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
                 done_videos.append(dest)
             else:
                 logline(f"❌ {it.title[:26]} 失败：{msg}", "err")
+
+    # ★ 两个平台并行跑（内部已用 _search_lock 串行化搜索阶段）。
+    #   ★ 依次创建 task（而不是一次性 gather）→ asyncio.Lock 是 FIFO 的，
+    #     所以 plats 里排在前面的平台先开始搜（用户要「先搜抖音」）。
+    tasks = []
+    for plat in plats:
+        tasks.append(asyncio.create_task(_plat_task(plat)))
+        await asyncio.sleep(0.05)      # 让它先跑到锁那里排队
+    await asyncio.gather(*tasks)
 
     # ★ 记住本次下载了哪些视频（剪辑默认就用这批，不会混进别的关键词）
     with _lock:
@@ -592,12 +620,17 @@ async def run_clip_job(dl_dir: Path, plats: list[str], orientation: str,
         logline(f"🎬 用最近一次下载的 {len(videos)} 个视频"
                 f"（关键词：{last_kw or '—'}）")
     if not videos:
-        media = scan_media(dl_dir, plats, keyword=last_kw)
+        # ★ 没有本次下载记录 → 用【本次下载的目录】(out_root)，
+        #   不是下载根目录（根目录里还躺着别的日期文件夹）
+        with _lock:
+            out_root = JOB.get("out_root") or ""
+        scan_dir = Path(out_root) if out_root and Path(out_root).exists() else dl_dir
+        media = scan_media(scan_dir, plats, keyword=last_kw)
         videos = []
         for k in ("douyin", "kuaishou"):
             if k in plats:
                 videos.extend(media[k])
-        logline(f"🎬 从文件夹里找到 {len(videos)} 个视频"
+        logline(f"🎬 从 {scan_dir} 找到 {len(videos)} 个视频"
                 + (f"（按关键词「{last_kw}」过滤）" if last_kw else ""))
     if not videos:
         return {"ok": False, "msg": "下载目录里没找到视频（先下载一批再来剪）"}
@@ -791,6 +824,9 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 d = dict(JOB)
                 d["clip_busy"] = CLIP_BUSY["running"]
+                # ★ 前端据此决定「生成剪映草稿」按钮要不要亮
+                d["clip_ready"] = len(d.get("last_videos") or []) > 0
+                d["clip_out"] = d.get("out_root", "")
             self._json(d)
             return
         if p == "/api/config":
