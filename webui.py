@@ -37,6 +37,10 @@ DEFAULT_CONFIG = {
     "orientation": "portrait",
     "platforms": ["douyin", "kuaishou"],
     "order": "like",
+    "clip_enabled": False,
+    "clip_orientation": "portrait",
+    "clip_dur": 1.5,
+    "ai_pick": False,
 }
 
 # 目录选择弹窗的状态（后台弹，前端轮询取结果）
@@ -44,7 +48,8 @@ PICK_STATE = {"dir": "", "running": False}
 
 # 任务状态（单任务，够用）
 JOB: dict = {"running": False, "phase": "", "log": [], "items": [],
-             "out_root": "", "done": 0, "total": 0, "error": ""}
+             "out_root": "", "done": 0, "total": 0, "error": "",
+             "draft_root": "", "draft_id": "", "pending_clips": 0}
 _lock = threading.Lock()
 
 # ── 登录/验证状态缓存（避免每次刷新都真发网络请求，把机器打爆）──
@@ -96,6 +101,12 @@ def save_config(cfg: dict) -> dict:
         "orientation": cfg.get("orientation") or "portrait",
         "platforms": [p for p in (cfg.get("platforms") or []) if p in PLAT_DIR],
         "order": cfg.get("order") if cfg.get("order") in ORDER_NAME else "like",
+        "clip_enabled": bool(cfg.get("clip_enabled")),
+        "clip_orientation": (cfg.get("clip_orientation")
+                             if cfg.get("clip_orientation") in ("portrait", "landscape")
+                             else "portrait"),
+        "clip_dur": max(1.0, min(1.5, float(cfg.get("clip_dur") or 1.5))),
+        "ai_pick": bool(cfg.get("ai_pick")),
     }
     try:
         CONFIG_FILE.write_text(json.dumps(out, ensure_ascii=False, indent=2),
@@ -258,7 +269,9 @@ ORDER_NAME = {"like": "点赞多", "comment": "评论多", "newest": "最新", "
 
 
 async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
-                  plats: tuple[str, ...], order: str = "like") -> None:
+                  plats: tuple[str, ...], order: str = "like",
+                  clip_enabled: bool = False, clip_orientation: str = "portrait",
+                  clip_dur: float = 1.5, ai_pick: bool = False) -> None:
     """搜索 + 下载，全程把进度写进 JOB。
 
     ★ 不再自动弹浏览器要求登录 —— 登录由界面上的「登录」按钮手动触发，
@@ -273,6 +286,7 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
     logline(f"输出目录：{out_root}")
 
     idx = 0
+    done_videos: list[Path] = []
     for plat in plats:
         # ★ 不再【预先探测登录态】—— 预检查会误判（探测口径和搜索口径不一致，
         #   于是出现「状态栏说可用、下载却提示待登录」）。
@@ -352,13 +366,164 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
                 with _lock:
                     JOB["done"] += 1
                 logline(f"✅ {dest.name}  {msg}")
+                done_videos.append(dest)
             else:
                 logline(f"❌ {it.title[:30]}  {msg}", "err")
+
+    # ── 剪映自动剪辑（可选）──
+    if clip_enabled and done_videos:
+        try:
+            if ai_pick:
+                # ★ AI 模式：只抽帧登记，【不阻塞等 AI】（任务先结束）
+                #   等 AI 选段提交后，点页面上的「生成剪映草稿」即可
+                await prepare_ai_clips(done_videos, keyword, out_root, logline)
+            else:
+                await make_clip_draft(done_videos, keyword, out_root,
+                                      clip_orientation, clip_dur, False, logline)
+        except Exception as e:
+            logline(f"⚠ 剪映剪辑失败：{str(e)[:140]}", "err")
 
     with _lock:
         JOB["running"] = False
         JOB["phase"] = "完成"
     logline(f"全部完成：{JOB['done']} / {JOB['total']} 个文件")
+
+
+# ------------------------------------------------------------------ 剪映剪辑
+
+# AI 选段：外部（WorkBuddy 会话）看帧后把结果写进来
+AI_PICK: dict = {}
+# 正在等待选段的视频（含候选帧路径，供外部读取）
+CLIP_PENDING: dict = {}
+
+
+async def prepare_ai_clips(videos: list[Path], keyword: str, out_root: Path,
+                           logline) -> None:
+    """AI 模式：只抽帧并登记成「待选段」，让 AI 看完再生成草稿。"""
+    import clip as clip_mod
+    logline(f"\n🎬 已抽取候选画面，等待 AI 选段（{len(videos)} 个视频）")
+    clips_dir = out_root / "_剪映片段"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for v in videos:
+        frames = await clip_mod.extract_frames(v, clips_dir / v.stem, max_frames=8)
+        if not frames:
+            continue
+        total = clip_mod.probe_duration(v)
+        with _lock:
+            CLIP_PENDING[str(v)] = {
+                "video": str(v),
+                "keyword": keyword,
+                "duration": round(total, 2),
+                "frames": [{"path": f.path, "t": f.t, "score": f.score}
+                           for f in frames],
+            }
+        n += 1
+    with _lock:
+        JOB["pending_clips"] = n
+    logline(f"  · {n} 个视频已抽出候选画面")
+    logline("  · 让 WorkBuddy 帮你选段（跟它说「帮我选段」），"
+            "选完点页面上的「🎬 生成剪映草稿」", "warn")
+
+
+async def make_draft_from_pending(orientation: str, dur: float,
+                                  logline) -> dict:
+    """把待选段的视频裁成片段并装配成草稿（AI 选段结果优先，没有就用本地选段）。"""
+    import clip as clip_mod
+    import capcut as capcut_mod
+    with _lock:
+        pending = dict(CLIP_PENDING)
+    if not pending:
+        return {"ok": False, "msg": "没有待选段的素材"}
+    videos = [Path(k) for k in pending.keys() if Path(k).exists()]
+    if not videos:
+        return {"ok": False, "msg": "待选段的素材文件都不见了"}
+    # 找出这些视频所在目录（作为输出根）
+    root = videos[0].parent.parent
+    # ★ key 是 str(v)（Windows 反斜杠路径），不能用 as_posix()（会变正斜杠 → KeyError）
+    kw = pending[str(videos[0])].get("keyword", "")
+    return await make_clip_draft(videos, kw, root, orientation, dur, True, logline)
+
+
+async def make_clip_draft(videos: list[Path], keyword: str, out_root: Path,
+                          orientation: str, dur: float, ai_pick: bool,
+                          logline) -> None:
+    """抽帧 → 选段 → 裁出 1-1.5 秒片段 → 装配成剪映草稿。
+
+    选段两条路：
+      ① AI 选段（ai_pick=True）：把候选帧交给多模态模型看，按语义挑
+      ② 本地选段：按「画面信息量」打分，避开黑屏/静止封面/片头
+    """
+    import clip as clip_mod
+    import capcut as capcut_mod
+
+    logline(f"\n🎬 开始剪映自动剪辑（{len(videos)} 个视频，每段 {dur:.1f} 秒，"
+            f"{'竖屏' if orientation != 'landscape' else '横屏'}）")
+    clips_dir = out_root / "_剪映片段"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    clips: list[dict] = []
+
+    for i, v in enumerate(videos, 1):
+        logline(f"  [{i}/{len(videos)}] 分析画面：{v.name[:30]}")
+        frames = await clip_mod.extract_frames(v, clips_dir / v.stem, max_frames=8)
+        if not frames:
+            logline(f"      ⚠ 抽不出画面，跳过", "warn")
+            continue
+        total = clip_mod.probe_duration(v)
+        # 登记待选段（供外部 AI 读取候选帧并提交选择）
+        with _lock:
+            CLIP_PENDING[str(v)] = {
+                "video": str(v),
+                "keyword": keyword,
+                "duration": round(total, 2),
+                "frames": [{"path": f.path, "t": f.t, "score": f.score}
+                           for f in frames],
+            }
+
+        idx = -1
+        how = ""
+        if ai_pick:
+            with _lock:
+                got = AI_PICK.get(str(v))
+            if got:
+                idx = int(got.get("index", 0))
+                how = "AI 选帧"
+            else:
+                logline("      ⚠ 这条没有 AI 选段结果，改用本地选段", "warn")
+        if idx < 0:
+            # 本地选段：信息量最高的帧
+            best = max(frames, key=lambda f: f.score)
+            idx = frames.index(best)
+            how = f"本地选帧（信息量 {best.score:.1f}）"
+
+        start, d = clip_mod.pick_segment([frames[idx]], max(0.5, dur - 0.5),
+                                         dur, total)
+        out = clips_dir / f"{i:02d}_{v.stem[:24]}.mp4"
+        ok, msg = await clip_mod.cut_clip(v, start, d, out, orientation)
+        if not ok:
+            logline(f"      ❌ 裁剪失败：{msg}", "err")
+            continue
+        clips.append({"path": out, "duration": d,
+                      "desc": f"{v.stem[:24]} @ {frames[idx].t:.1f}s（{how}）"})
+        logline(f"      ✅ 片段 {i}：{frames[idx].t:.1f}s 处 · {msg}")
+
+    if not clips:
+        logline("  ⚠ 没有可用片段，未生成草稿", "warn")
+        return
+
+    logline(f"  · 共 {len(clips)} 个片段 → 装配剪映草稿")
+    work = out_root / "_剪映草稿"
+    res = capcut_mod.build_draft(clips, work, orientation, "720p",
+                                 f"{keyword}自动剪辑", log=logline)
+    if res.get("ok"):
+        logline(f"  ✅ 剪映草稿已生成：{res.get('draft_root')}")
+        logline(f"     草稿ID {res.get('draft_id')} · {res.get('shots')} 镜 · "
+                f"总时长 {res.get('total')} 秒 · 打开剪映即可看到")
+        with _lock:
+            JOB["draft_root"] = res.get("draft_root", "")
+            JOB["draft_id"] = res.get("draft_id", "")
+    else:
+        logline(f"  ❌ 草稿生成失败：{res.get('msg')}", "err")
 
 
 # ------------------------------------------------------------------ HTTP
@@ -430,6 +595,10 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=_pick, daemon=True).start()
             self._json({"ok": True, "started": True})
             return
+        if p == "/api/clip/pending":
+            with _lock:
+                self._json({"items": list(CLIP_PENDING.values())})
+            return
         if p == "/api/pickdir_result":
             with _lock:
                 self._json({"dir": PICK_STATE["dir"],
@@ -457,11 +626,20 @@ class Handler(BaseHTTPRequestHandler):
             count = max(1, int(body.get("count") or 10))
             orient = body.get("orientation") or "portrait"
             order = body.get("order") or "like"
+            clip_enabled = bool(body.get("clip_enabled"))
+            clip_orientation = body.get("clip_orientation") or "portrait"
+            clip_dur = max(1.0, min(1.5, float(body.get("clip_dur") or 1.5)))
+            ai_pick = bool(body.get("ai_pick"))
             plats = tuple(body.get("platforms") or ("douyin", "kuaishou"))
             save_config({"dir": str(dl), "count": count, "orientation": orient,
-                         "platforms": list(plats), "order": order})
+                         "platforms": list(plats), "order": order,
+                         "clip_enabled": clip_enabled,
+                         "clip_orientation": clip_orientation,
+                         "clip_dur": clip_dur, "ai_pick": ai_pick})
             th = threading.Thread(target=lambda: asyncio.run(
-                run_job(keyword, dl, count, orient, plats, order)), daemon=True)
+                run_job(keyword, dl, count, orient, plats, order,
+                        clip_enabled, clip_orientation, clip_dur, ai_pick)),
+                daemon=True)
             th.start()
             self._json({"ok": True})
             return
@@ -482,6 +660,30 @@ class Handler(BaseHTTPRequestHandler):
                     _refresh_status_worker()
 
             threading.Thread(target=_do, daemon=True).start()
+            self._json({"ok": True})
+            return
+        if p == "/api/clip/make_draft":
+            orientation = body.get("orientation") or "portrait"
+            dur = max(1.0, min(1.5, float(body.get("dur") or 1.5)))
+            res_holder = {}
+
+            def _mk():
+                try:
+                    res_holder["r"] = asyncio.run(
+                        make_draft_from_pending(orientation, dur, logline))
+                except Exception as e:
+                    # ★ 失败一定要写日志，否则用户只看到「点了没反应」
+                    logline(f"  ❌ 生成草稿失败：{type(e).__name__}: {str(e)[:150]}", "err")
+                    res_holder["r"] = {"ok": False, "msg": str(e)[:150]}
+
+            threading.Thread(target=_mk, daemon=True).start()
+            self._json({"ok": True, "started": True})
+            return
+        if p == "/api/clip/select":
+            path = body.get("path") or ""
+            idx = int(body.get("index") or 0)
+            with _lock:
+                AI_PICK[path] = {"index": idx, "at": time.time()}
             self._json({"ok": True})
             return
         if p == "/api/save":
