@@ -212,6 +212,22 @@ def refresh_status_async():
         _status_thread.start()
 
 
+def _set_status(plat: str, ok: bool, why: str) -> None:
+    """只更新某个平台的登录状态（不重新开浏览器探测）→ 秒级刷新。
+
+    ★ 为什么不能每次都 _refresh_status_worker()：那个函数要开浏览器探测，
+      登录刚完成时再开一次要好几秒，用户看到的就是「登录成功了但状态半天不变」。
+    """
+    with _lock:
+        items = {i["plat"]: dict(i) for i in STATUS_CACHE["items"]}
+        cur = items.get(plat) or {}
+        items[plat] = {"plat": plat, "name": PLAT_NAME[plat], "ok": ok,
+                        "why": why,
+                        "local": auth.has_local_auth(plat)}
+        STATUS_CACHE["items"] = list(items.values())
+        STATUS_CACHE["at"] = time.time()
+
+
 def _refresh_status_worker():
     with _lock:
         if JOB.get("running"):
@@ -285,27 +301,48 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
                     "out_root": str(out_root), "done": 0, "total": 0, "error": ""})
     logline(f"输出目录：{out_root}")
 
+    # ★★ 两个平台【并行搜索】—— 原来串行要等 40~60 秒才开始下载。
+    #   抖音用 dy profile、快手用 ks profile，不同目录不会互相打架。
+    async def _do_search(plat):
+        try:
+            # ★ limit 别贪多：第一页通常就有 10 条，要太多就得一直滚动等分页
+            #   （搜索慢的大头）。留一点余量给竖屏过滤就够了。
+            items = await search_mod.search(plat, keyword,
+                                            limit=max(count + 5, count * 2))
+            return plat, items, None
+        except auth.AuthExpired as e:
+            return plat, [], e
+        except Exception as e:
+            return plat, [], e
+
+    logline(f"正在搜索：{'、'.join(PLAT_NAME[p] for p in plats)}（并行）")
+    with _lock:
+        JOB["phase"] = "搜索中"
+    search_res = await asyncio.gather(*[_do_search(p) for p in plats],
+                                      return_exceptions=True)
+
     idx = 0
     done_videos: list[Path] = []
-    for plat in plats:
+    for r in search_res:
+        if isinstance(r, BaseException):
+            plat = plats[0]
+            items, err = [], r
+        else:
+            plat, items, err = r
         # ★ 不再【预先探测登录态】—— 预检查会误判（探测口径和搜索口径不一致，
         #   于是出现「状态栏说可用、下载却提示待登录」）。
         #   直接开搜：搜索接口自己会告诉我们要不要登录/验证（AuthExpired），
         #   搜得到就是搜得到，搜不到就如实说「没搜到结果」。
-        with _lock:
-            JOB["phase"] = f"搜索 {PLAT_NAME[plat]}"
-        logline(f"正在搜索 {PLAT_NAME[plat]}：{keyword}")
-        try:
-            items = await search_mod.search(plat, keyword, limit=count * 5)
-        except auth.AuthExpired as e:
-            logline(f"{e}", "warn")
-            logline(f"请点上方「登录」按钮处理 {PLAT_NAME[plat]}，再重新下载。", "warn")
+        if isinstance(err, auth.AuthExpired):
+            logline(f"{err}", "warn")
+            logline(f"请点上方「{PLAT_NAME[plat]}」的「登录」按钮处理，"
+                    f"再重新下载。", "warn")
             set_item(idx, plat=plat, name="（需要登录/验证）", state="need_auth",
                      pct=0, size=0, wh="")
             idx += 1
             continue
-        except Exception as e:
-            logline(f"{PLAT_NAME[plat]} 搜索失败：{str(e)[:120]}", "err")
+        if err is not None:
+            logline(f"{PLAT_NAME[plat]} 搜索失败：{str(err)[:120]}", "err")
             set_item(idx, plat=plat, name="（搜索失败）", state="failed", pct=0,
                      size=0, wh="")
             idx += 1
@@ -357,6 +394,11 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
                 set_item(_m, pct=pct, got=got, total=total)
 
             good, msg = await download(plat, it.play_url, dest, on_progress=cb)
+            if not good:
+                # ★ 失败重试一次（CDN 偶尔抽风），并在日志里写明原因
+                logline(f"⚠ {it.title[:26]} 下载失败（{msg}），重试一次…", "warn")
+                await asyncio.sleep(2)
+                good, msg = await download(plat, it.play_url, dest, on_progress=cb)
             real_size = dest.stat().st_size if dest.exists() else 0
             set_item(my, state="done" if good else "failed",
                      pct=100 if good else 0,
@@ -368,7 +410,7 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
                 logline(f"✅ {dest.name}  {msg}")
                 done_videos.append(dest)
             else:
-                logline(f"❌ {it.title[:30]}  {msg}", "err")
+                logline(f"❌ {it.title[:26]} 失败：{msg}", "err")
 
     # ── 剪映自动剪辑（可选）──
     if clip_enabled and done_videos:
@@ -398,6 +440,8 @@ CLIP_PENDING: dict = {}
 
 
 PLAT_DIRNAME = {"douyin": "抖音", "kuaishou": "快手"}
+# 剪辑任务是否在跑（前端据此让按钮转圈）
+CLIP_BUSY = {"running": False}
 
 
 def scan_media(dl_dir: Path, plats: list[str]) -> dict:
@@ -464,6 +508,23 @@ async def run_clip_job(dl_dir: Path, plats: list[str], orientation: str,
     ★ 视频条数 = 文件夹里实际有多少（不强行凑数）；
       有人脸的片段会被跳过，所以最终可能少于原数。
     """
+    # ★★ 先看各平台登录状态：没登录/没过验证 → 【暂停剪辑】并说清楚，
+    #   别在用户根本没登录的情况下默默去剪（之前就是这么干的）
+    ready = True
+    for k in plats:
+        try:
+            ok, why = await auth.check_auth_in_browser(k)
+        except Exception as e:
+            ok, why = False, str(e)[:60]
+        if not ok:
+            ready = False
+            logline(f"  ⛔ {PLAT_NAME[k]} 还没登录/没通过验证（{why}）"
+                    f"→ 自动剪辑已暂停", "err")
+            logline(f"     请先点上方「{PLAT_NAME[k]}」的「登录」按钮处理完，"
+                    f"再回来生成草稿", "err")
+    if not ready:
+        return {"ok": False, "msg": "有平台未登录，自动剪辑已暂停"}
+
     media = scan_media(dl_dir, plats)
     # ★ 只取用户勾选的平台
     videos = []
@@ -647,7 +708,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if p == "/api/state":
             with _lock:
-                self._json(dict(JOB))
+                d = dict(JOB)
+                d["clip_busy"] = CLIP_BUSY["running"]
+            self._json(d)
             return
         if p == "/api/config":
             self._json(load_config())
@@ -740,9 +803,15 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     asyncio.run(auth.prepare(plat))
                 finally:
-                    # ★ 登录/验证刚完成 → 立刻重探一次并写进缓存，
-                    #   否则前端要等缓存过期（90s）才看到「已就绪」
-                    _refresh_status_worker()
+                    # ★ 登录/验证刚完成 → 立刻更新状态（秒级）。
+                    #   check_auth_in_browser 有 30 秒缓存，这里直接命中，
+                    #   不用再开一次浏览器（那要好几秒，用户会觉得「没刷新」）。
+                    try:
+                        ok, why = asyncio.run(auth.check_auth_in_browser(plat))
+                    except Exception:
+                        ok, why = False, "状态检测失败"
+                    _set_status(plat, ok, why)
+                    logline(f"✅ {PLAT_NAME[plat]} 状态已更新：{why}")
 
             threading.Thread(target=_do, daemon=True).start()
             self._json({"ok": True})
@@ -765,6 +834,8 @@ class Handler(BaseHTTPRequestHandler):
             res_holder = {}
 
             def _mk():
+                with _lock:
+                    CLIP_BUSY["running"] = True
                 try:
                     res_holder["r"] = asyncio.run(run_clip_job(
                         Path(dl), plats, orientation, dur, avoid_faces, ai_pick,
@@ -773,6 +844,9 @@ class Handler(BaseHTTPRequestHandler):
                     # ★ 失败一定要写日志，否则用户只看到「点了没反应」
                     logline(f"  ❌ 生成草稿失败：{type(e).__name__}: {str(e)[:150]}", "err")
                     res_holder["r"] = {"ok": False, "msg": str(e)[:150]}
+                finally:
+                    with _lock:
+                        CLIP_BUSY["running"] = False
 
             threading.Thread(target=_mk, daemon=True).start()
             self._json({"ok": True, "started": True})

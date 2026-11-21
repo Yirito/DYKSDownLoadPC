@@ -98,22 +98,60 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
           <label><input type="checkbox" id="pks" checked>快手</label>
         </div>
       </div>
-      <div style="max-width:190px">
-        <label>排序方式</label>
-        <select id="order" style="width:100%;padding:9px 10px;border:.5px solid rgba(0,0,0,.18);
-                border-radius:9px;font:15px inherit;background:#fff">
-          <option value="like">点赞多的</option>
-          <option value="comment">评论多的</option>
-          <option value="newest">最新的</option>
-          <option value="default">默认（不排序）</option>
-        </select>
-      </div>
     </div>
 
     <div style="margin-top:18px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <button class="btn" id="start">开始下载</button>
       <span id="phase" style="color:#78786f"></span>
     </div>
+  </div>
+
+  <div class="card">
+    <details id="settingsBox">
+      <summary style="cursor:pointer;font-size:14px;font-weight:500;color:#22221f;
+        list-style:none;user-select:none">⚙️ 设置（排序 / 剪辑参数）</summary>
+      <div class="row" style="margin-top:14px">
+        <div style="max-width:190px">
+          <label>排序方式</label>
+          <select id="order" style="width:100%;padding:9px 10px;border:.5px solid rgba(0,0,0,.18);
+                  border-radius:9px;font:15px inherit;background:#fff">
+            <option value="like">点赞多的</option>
+            <option value="comment">评论多的</option>
+            <option value="newest">最新的</option>
+            <option value="default">默认（不排序）</option>
+          </select>
+        </div>
+        <div style="max-width:170px">
+          <label>单段时长（秒）</label>
+          <input type="number" id="clipDur" value="1.5" min="1" max="1.5" step="0.1">
+        </div>
+        <div>
+          <label>剪辑方向</label>
+          <div class="chk">
+            <label><input type="radio" name="clipori" value="portrait" checked>竖屏 9:16</label>
+            <label><input type="radio" name="clipori" value="landscape">横屏 16:9</label>
+          </div>
+        </div>
+        <div style="max-width:280px">
+          <label>选段方式</label>
+          <div class="chk">
+            <label><input type="radio" name="aipick" value="no" checked>自动（避开黑屏/片头）</label>
+            <label><input type="radio" name="aipick" value="yes">AI 精确选段</label>
+          </div>
+        </div>
+        <div style="max-width:300px">
+          <label>人脸处理</label>
+          <div class="chk">
+            <label><input type="radio" name="faceopt" value="skip" checked>有人脸就跳过（不露脸）</label>
+            <label><input type="radio" name="faceopt" value="keep">保留人脸</label>
+          </div>
+        </div>
+      </div>
+      <div class="hint">
+        排序方式：抖音支持点赞/评论/最新；快手搜索接口不返回评论数，
+        选「评论多的」时会自动按点赞排序并提示。
+      </div>
+    </details>
   </div>
 
   <div class="card">
@@ -128,31 +166,6 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
         <div class="chk">
           <label><input type="checkbox" id="clipDy" checked>抖音</label>
           <label><input type="checkbox" id="clipKs" checked>快手</label>
-        </div>
-      </div>
-      <div style="max-width:170px">
-        <label>单段时长（秒）</label>
-        <input type="number" id="clipDur" value="1.5" min="1" max="1.5" step="0.1">
-      </div>
-      <div>
-        <label>剪辑方向</label>
-        <div class="chk">
-          <label><input type="radio" name="clipori" value="portrait" checked>竖屏 9:16</label>
-          <label><input type="radio" name="clipori" value="landscape">横屏 16:9</label>
-        </div>
-      </div>
-      <div style="max-width:280px">
-        <label>选段方式</label>
-        <div class="chk">
-          <label><input type="radio" name="aipick" value="no" checked>自动（避开黑屏/片头）</label>
-          <label><input type="radio" name="aipick" value="yes">AI 精确选段</label>
-        </div>
-      </div>
-      <div style="max-width:300px">
-        <label>人脸处理</label>
-        <div class="chk">
-          <label><input type="radio" name="faceopt" value="skip" checked>有人脸就跳过（不露脸）</label>
-          <label><input type="radio" name="faceopt" value="keep">保留人脸</label>
         </div>
       </div>
     </div>
@@ -328,8 +341,24 @@ $('mkDraft').onclick = function () {
     body: JSON.stringify({dir: $('dir').value.trim(), plats: clipPlats(),
                           orientation: ori, dur: parseFloat($('clipDur').value) || 1.5,
                           ai_pick: ai, avoid_faces: avoid})})
-    .then(function(){ setTimeout(function(){ b.disabled = false; }, 6000); })
-    .catch(function(){ b.disabled = false; });
+    .then(function(){
+      /* ★ 按住不放：剪辑过程中按钮保持转圈+灰色，
+         直到服务端说「不忙了」为止 —— 避免用户以为没反应又点好几次 */
+      var t = 0;
+      var iv = setInterval(function(){
+        t++;
+        fetch('/api/state').then(function(r){return r.json();}).then(function(st){
+          if (!st.clip_busy) {
+            clearInterval(iv);
+            b.disabled = false; b.textContent = '🎬 生成剪映草稿';
+          } else if (t % 4 === 0) {
+            b.textContent = '🎬 剪辑中… ' + Math.round(t / 2) + 's';
+          }
+          if (t > 600) { clearInterval(iv); b.disabled = false; b.textContent = '🎬 生成剪映草稿'; }
+        }).catch(function(){});
+      }, 2000);
+    })
+    .catch(function(){ b.disabled = false; b.textContent = '🎬 生成剪映草稿'; });
 };
 
 /* 剪映剪辑开关：启用后放开选项区 */
@@ -368,7 +397,14 @@ function loadStatus(force) {
                 '" data-plat="' + it.plat + '">登录</button>';
         }
       }
-      return '<span class="st ' + cls + '">' + esc(it.name) + ' ' + txt +
+      var home = it.plat === 'douyin' ? 'https://www.douyin.com/'
+               : 'https://www.kuaishou.com/';
+      return '<span class="st ' + cls + '" data-plat="' + it.plat + '" data-ok="'
+             + (it.ok ? '1' : '0') + '">'
+             + '<a href="' + home + '" target="_blank" title="点开'
+             + esc(it.name) + '网页版（方便手动登录）" style="color:inherit;'
+             + 'text-decoration:underline dotted;cursor:pointer">'
+             + esc(it.name) + '</a> ' + txt +
              '<span style="opacity:.8">' + esc(it.why||'') + '</span>' + btn + '</span>';
     }).join('') || '<span class="st">检测中…</span>';
   }).catch(function(){});
@@ -384,23 +420,19 @@ $('status').addEventListener('click', function(e){
   fetch('/api/prepare', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({plat: plat})})
     .then(function(){
-      /* ★ 每 2 秒探一次，一检测到就绪立刻刷新显示
-         （不用等 15 秒的常规轮询） */
+      /* ★ 每 2 秒探一次：一旦显示「可用」立刻刷新（不等 15 秒轮询）。
+         无论成功失败，90 秒后一定会收尾并恢复「登录」按钮，
+         不会再卡在「处理中…」让按钮消失。 */
       var n = 0;
       var iv = setInterval(function(){
         n++;
         loadStatus(true);
-        var still = document.querySelector('#status button[data-plat="' + plat + '"]');
-        if (!still) {                 // 按钮消失 = 已就绪
-          clearInterval(iv);
-          pendingPlat = null;
-          loadStatus(true);
-          return;
+        var el = document.querySelector('#status .st[data-plat="' + plat + '"]');
+        if (el && el.getAttribute('data-ok') === '1') {
+          clearInterval(iv); pendingPlat = null; loadStatus(true); return;
         }
-        if (n > 120) {                // 4 分钟还没成，放弃等待
-          clearInterval(iv);
-          pendingPlat = null;
-          loadStatus(true);
+        if (n > 45) {                 // 90 秒还没成，放弃等待（按钮会回来）
+          clearInterval(iv); pendingPlat = null; loadStatus(true);
         }
       }, 2000);
     });

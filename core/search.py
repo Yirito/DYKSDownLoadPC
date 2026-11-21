@@ -168,13 +168,21 @@ async def _search_douyin(ctx, keyword: str, limit: int) -> list[Item]:
     await page.goto(f"https://www.douyin.com/search/{quote(keyword)}?type=video",
                     wait_until="domcontentloaded", timeout=45000)
     # ★ 抖音搜索：第一页常常 aweme_list=null，真正的数据在【翻页请求】里
-    #   → 必须等够时间 + 多滚几次，让它把 offset=16/26 的分页也发出来
-    await page.wait_for_timeout(9000)
-    for i in range(8):
-        await page.mouse.wheel(0, 3000)
-        await page.wait_for_timeout(2600)
-        if sum(len(b) for b in buckets) >= limit:
+    #   → 要等 + 多滚几次让分页发出来
+    # ★★ 但不能【死等】：原来先死等 9 秒再滚，够数了也不停 → 白等 20~30 秒。
+    #   改成边等边看，够数立刻走。
+    def _got():
+        return sum(len(b) for b in buckets) >= limit
+
+    for _ in range(20):                      # 最多等 10 秒拿第一页
+        await page.wait_for_timeout(500)
+        if _got():
             break
+    for i in range(8):
+        if _got():
+            break
+        await page.mouse.wheel(0, 3000)
+        await page.wait_for_timeout(1800)
     if not buckets:
         # 再来一轮：有时第一下滚动没生效
         for i in range(4):
@@ -246,12 +254,19 @@ async def _search_kuaishou(ctx, keyword: str, limit: int) -> list[Item]:
     page.on("response", lambda r: asyncio.create_task(on_resp(r)))
     await page.goto(f"https://www.kuaishou.com/search/video?searchKey={quote(keyword)}",
                     wait_until="domcontentloaded", timeout=45000)
-    await page.wait_for_timeout(8000)
-    for i in range(8):
-        await page.mouse.wheel(0, 2600)
-        await page.wait_for_timeout(2400)
-        if sum(len(b) for b in buckets) >= limit:
+    # ★ 同样：边滚边看，够数立刻走（别白等）
+    def _got2():
+        return sum(len(b) for b in buckets) >= limit
+
+    for _ in range(16):                      # 先等第一页（最多 8 秒）
+        await page.wait_for_timeout(500)
+        if _got2():
             break
+    for i in range(8):
+        if _got2():
+            break
+        await page.mouse.wheel(0, 2600)
+        await page.wait_for_timeout(1800)
     await page.close()
     if need_verify and not buckets:
         raise AuthExpired("kuaishou", "快手要求过人机验证（result=400002）")
