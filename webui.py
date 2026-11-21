@@ -38,6 +38,9 @@ DEFAULT_CONFIG = {
     "platforms": ["douyin", "kuaishou"],
 }
 
+# 目录选择弹窗的状态（后台弹，前端轮询取结果）
+PICK_STATE = {"dir": "", "running": False}
+
 # 任务状态（单任务，够用）
 JOB: dict = {"running": False, "phase": "", "log": [], "items": [],
              "out_root": "", "done": 0, "total": 0, "error": ""}
@@ -105,22 +108,40 @@ def save_config(cfg: dict) -> dict:
 def pick_directory(initial: str = "") -> str:
     """弹 Windows 原生「浏览文件夹」对话框，返回选中的目录（取消返回 ""）。
 
-    ★ 用 PowerShell 的 System.Windows.Forms.FolderBrowserDialog：
+    ★ 用 System.Windows.Forms.FolderBrowserDialog：
       标准托管 UI、自带消息泵，本地桌面必弹
       （比 ctypes 直调 SHBrowseForFolder 稳，后者在非 UI 线程里常静默返回 None）。
-      脚本走 -EncodedCommand（base64 UTF-16LE），彻底避免 shell 字符串解析问题。
+    ★ 关键：必须【置顶】。原来的写法弹出来的窗体可能压在浏览器窗口底下，
+      用户根本看不见 → 反馈就是「点不了」。
+      做法：建一个 TopMost 的空 Form 当父窗体，把对话框挂上去。
+    ★ 脚本走 -EncodedCommand（base64 UTF-16LE），彻底避免 shell 字符串解析问题。
     """
     import base64
     import subprocess
     try:
         ps = ("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;"
               "Add-Type -AssemblyName System.Windows.Forms;"
+              "$f = New-Object System.Windows.Forms.Form;"
+              "$f.TopMost = $true;"
+              "$f.ShowInTaskbar = $false;"
+              "$f.StartPosition = 'CenterScreen';"
+              "$f.WindowState = 'Normal';"
+              "$f.Show();"
+              # ★ 三连：置顶 + 激活 + 置前
+              #   SendKeys '%' 是 Windows 的老技巧：模拟按一下 Alt，
+              #   释放「前台窗口锁」，否则后面的窗口抢不到焦点（会弹到后台看不见）
+              "$f.Activate();"
+              "$f.BringToFront();"
+              "[System.Windows.Forms.SendKeys]::SendWait('%');"
+              "Start-Sleep -Milliseconds 300;"
+              "$f.Activate();"
               "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
               "$d.Description = '选择下载目录';"
               "$d.ShowNewFolderButton = $true;")
         if initial and os.path.isdir(initial):
             ps += "$d.SelectedPath = '%s';" % initial.replace("'", "''")
-        ps += "if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath }"
+        ps += ("if ($d.ShowDialog($f) -eq 'OK') { $d.SelectedPath }"
+               " $f.Close()")
         enc = base64.b64encode(ps.encode("utf-16-le")).decode("ascii")
         proc = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", enc],
@@ -368,8 +389,29 @@ class Handler(BaseHTTPRequestHandler):
             self._json(list_dirs(path))
             return
         if p == "/api/pickdir":
+            # ★ 立刻返回，弹窗在后台线程弹 —— 同步等待会把浏览器请求卡住，
+            #   用户看着像「点不了」。前端改成轮询 /api/pickdir_result。
             init = (qs.get("init") or [""])[0]
-            self._json({"dir": pick_directory(init)})
+            with _lock:
+                PICK_STATE["dir"] = ""
+                PICK_STATE["running"] = True
+
+            def _pick():
+                try:
+                    d = pick_directory(init)
+                except Exception:
+                    d = ""
+                with _lock:
+                    PICK_STATE["dir"] = d
+                    PICK_STATE["running"] = False
+
+            threading.Thread(target=_pick, daemon=True).start()
+            self._json({"ok": True, "started": True})
+            return
+        if p == "/api/pickdir_result":
+            with _lock:
+                self._json({"dir": PICK_STATE["dir"],
+                            "running": PICK_STATE["running"]})
             return
         self._send(404, b"{}")
 

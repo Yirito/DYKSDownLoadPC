@@ -171,6 +171,44 @@ function saveConfig() {
     body: JSON.stringify(currentSettings())}).catch(function(){});
 }
 
+/* ---------- 选择文件夹（Windows 原生对话框）---------- */
+/* 后端在后台线程弹窗（置顶），接口立刻返回；这里轮询拿结果。
+   ★ 不能同步等待 —— 那样浏览器请求会卡住，看起来就像「点不了」。 */
+$('pick').onclick = function () {
+  var btn = this;
+  btn.disabled = true; btn.textContent = '弹窗中…';
+  fetch('/api/pickdir?init=' + encodeURIComponent($('dir').value.trim()))
+    .then(function (r) { return r.json(); })
+    .then(function () {
+      var n = 0;
+      var iv = setInterval(function () {
+        n++;
+        fetch('/api/pickdir_result').then(function (r) { return r.json(); })
+          .then(function (j) {
+            if (j.dir) {
+              clearInterval(iv);
+              $('dir').value = j.dir;
+              saveConfig();
+              btn.disabled = false; btn.textContent = '选择文件夹…';
+              return;
+            }
+            if (!j.running) {          // 弹窗被取消 / 没弹出来
+              clearInterval(iv);
+              btn.disabled = false; btn.textContent = '选择文件夹…';
+              if (!j.dir) {
+                alert('没选到目录（弹窗被取消，或服务没有交互桌面）。\n'
+                    + '可以直接把路径粘到上面的输入框里，一样能用。');
+              }
+            }
+          });
+        if (n > 120) { clearInterval(iv); btn.disabled = false; btn.textContent = '选择文件夹…'; }
+      }, 500);
+    })
+    .catch(function () {
+      btn.disabled = false; btn.textContent = '选择文件夹…';
+    });
+};
+
 /* ---------- 登录状态 + 手动登录 ---------- */
 /* 正在处理登录的平台（点「登录」后到就绪为止，一直显示「处理中…」） */
 var pendingPlat = null;
@@ -285,8 +323,24 @@ document.querySelectorAll('input[name=ori]').forEach(function(r){
 
 fetch('/api/config').then(r=>r.json()).then(applyConfig).catch(function(){});
 setInterval(poll, 1000);
-setInterval(function(){ loadStatus(false); }, 15000);
-poll(); loadStatus(true);
+/* 状态检测：还在「检测中…」时每 2 秒探一次，拿到结果后回到 15 秒一次。
+   （首次探测要开浏览器，几秒才出结果；干等 15 秒太慢） */
+var statusTimer = null;
+function scheduleStatus() {
+  if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+  var tick = function () {
+    loadStatus(true);
+    var pending = document.querySelector('#status .st') &&
+                  /检测中/.test(document.querySelector('#status').textContent);
+    if (pending) {
+      statusTimer = setTimeout(tick, 2000);
+    } else {
+      statusTimer = setTimeout(tick, 15000);
+    }
+  };
+  statusTimer = setTimeout(tick, 200);
+}
+poll(); loadStatus(true); scheduleStatus();
 </script>
 </body>
 </html>

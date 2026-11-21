@@ -395,10 +395,8 @@ async def check_auth_in_browser(plat: str, use_cache: bool = True) -> tuple[bool
         async with async_playwright() as pw:
             ctx = await _open_ctx(pw, plat, prof, headless=True)
             try:
-                page = await ctx.new_page()
-                await page.goto(_home_url(plat), wait_until="domcontentloaded",
-                                timeout=45000)
-                await page.wait_for_timeout(4000)
+                # ★ 不必加载页面：cookie 就在 profile 里，启动完直接拿。
+                #   （原来 goto 首页 + 等 4 秒要 15~30 秒，状态栏转圈半天）
                 ck = {c["name"]: c["value"] for c in await ctx.cookies()}
                 header = "; ".join(f"{k}={v}" for k, v in ck.items() if v)
                 ok, why = await check_auth(plat, cookie_header=header)
