@@ -127,7 +127,10 @@ def _ks_comment_count(ph: dict) -> int:
 def sort_items(items: list[Item], order: str = "like") -> list[Item]:
     """按指定方式排序。
 
-    order: like（点赞多，默认）/ comment（评论多）/ newest（最新）/ default（不排）
+    order: like（点赞多）/ comment（评论多）/ newest（最新）/ random（随机）
+           / default（不排）
+    ★ random 是用户明确要的：「总会带到同一件货的，万一剪辑一模一样就不好了」
+      —— 每次下载/剪辑的顺序都不同，避免每次都是同一批爆款。
     """
     if order == "like":
         return sorted(items, key=lambda x: x.like_count, reverse=True)
@@ -135,6 +138,11 @@ def sort_items(items: list[Item], order: str = "like") -> list[Item]:
         return sorted(items, key=lambda x: x.comment_count, reverse=True)
     if order == "newest":
         return sorted(items, key=lambda x: x.create_time, reverse=True)
+    if order == "random":
+        import random as _r
+        out = list(items)
+        _r.shuffle(out)
+        return out
     return list(items)
 
 

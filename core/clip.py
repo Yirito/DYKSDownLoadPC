@@ -80,6 +80,7 @@ class Frame:
     score: float = 0.0      # 画面信息量分数（越大越「有内容」）
     motion: float = 0.0     # ★ 动作强度（与上一帧的差异；吃/掰/切这种瞬间最高）
     focus: float = 0.0     # ★ 差异空间集中度（高=真实动作；低=转场闪切）
+    fresh: float = 0.0     # ★ 生鲜特写分（颜色鲜艳 + 主体占满画面 + 细节丰富）
     faces: int = 0          # ★ 画面里的人脸数量（-1 = 没检测能力，未知）
     reason: str = ""
 
@@ -189,6 +190,56 @@ def detect_faces(path: str, min_ratio: float = 0.06,
         return -1
 
 
+def _fresh_score(path: str) -> dict:
+    """「生鲜特写」评分：这是用户真正想要的镜头类型。
+
+    ★ 用户原话：「就那种生鲜特写吸引人的镜头」——
+      水果/生鲜占满画面、颜色鲜艳、细节丰富（果肉纹理）。
+    ★ 三个判据（纯本地，不用 AI）：
+      ① 饱和度：HSV 的 S 通道均值 —— 生鲜颜色鲜艳（橙/红/黄），
+         灰扑扑的厨房背景/夜景低分
+      ② 中心-边缘色差：特写画面【整幅都是产品】→ 中心与边缘颜色接近；
+         「人在厨房讲解」的镜头 → 中心是人、边缘是背景 → 色差大 → 低分
+      ③ 信息量：细节丰富（果肉、果皮纹理）
+    返回 {"sat":.., "center_edge":.., "detail":.., "score":..}
+    """
+    try:
+        from PIL import Image
+        import numpy as np
+        im = Image.open(path).convert("RGB").resize((160, 160))
+        a = np.asarray(im, dtype=np.float32)
+        # ① 饱和度（HSV 的 S）
+        mx = a.max(axis=2)
+        mn = a.min(axis=2)
+        sat = float(((mx - mn) / (mx + 1e-3)).mean() * 100)
+        # ② 中心 vs 边缘 的平均色差
+        c = a[53:107, 53:107].reshape(-1, 3).mean(axis=0)
+        ring = np.ones((160, 160), dtype=bool)
+        ring[40:120, 40:120] = False
+        e = a[ring].mean(axis=0)
+        center_edge = float(np.abs(c - e).mean())
+        # ③ 细节（灰度边缘密度）
+        g = a.mean(axis=2)
+        edge = float(np.abs(np.diff(g, axis=1)).mean())
+        # ④ ★ 主色占比：画面里【最大单一色彩簇】占多少
+        #   柿子成堆/特写 → 主色占比高（大片橙黄）
+        #   人在厨房讲解 → 主色分散（人、衣服、墙、台面各占一块）
+        q = (a // 32).astype(np.int32)           # 量化成色块
+        key = q[:, :, 0] * 64 + q[:, :, 1] * 8 + q[:, :, 2]
+        vals, cnts = np.unique(key.ravel(), return_counts=True)
+        dominant = float(cnts.max() / key.size)
+        # 综合：饱和度高 + 主色成片（=特写）+ 中心边缘接近 + 细节多
+        score = (sat * 0.32
+                 + dominant * 130.0
+                 + max(0.0, 60.0 - center_edge) * 0.9
+                 + min(30.0, edge * 6.0) * 0.7)
+        return {"sat": round(sat, 2), "center_edge": round(center_edge, 2),
+                "detail": round(edge, 2), "dominant": round(dominant, 3),
+                "score": round(score, 2)}
+    except Exception:
+        return {"sat": 0.0, "center_edge": 0.0, "detail": 0.0, "score": 0.0}
+
+
 def _frame_score(path: str) -> float:
     """算一帧的「画面信息量」。
 
@@ -294,7 +345,10 @@ def _appeal_score(f: Frame) -> float:
     focus_bonus = f.focus * 100.0        # 0~1 → 0~100
     if focus_bonus < 6.5:                 # ★ 差异铺满全图 → 判为转场，直接压掉
         return f.motion * 0.15 + f.score * 0.20
-    return f.motion * 0.55 + focus_bonus * 0.25 + f.score * 0.20
+    # ★★ 生鲜特写分权重最高 —— 用户要的就是「生鲜特写吸引人的镜头」：
+    #   颜色鲜艳 + 产品占满画面 + 细节丰富
+    return (f.fresh * 0.42 + f.motion * 0.30
+            + focus_bonus * 0.16 + f.score * 0.12)
 
 
 async def extract_frames(video: Path, out_dir: Path, fps: float = 2.5,
@@ -326,9 +380,10 @@ async def extract_frames(video: Path, out_dir: Path, fps: float = 2.5,
         rc, _, _ = await _run(cmd, timeout=90)
         if not (rc == 0 and fp.exists() and fp.stat().st_size > 500):
             return None
+        fs = _fresh_score(str(fp))
         return Frame(path=str(fp), t=round(t, 2),
                      score=round(_frame_score(str(fp)), 2),
-                     faces=detect_faces(str(fp)))
+                     fresh=fs["score"], faces=detect_faces(str(fp)))
 
     # ★ 并发抽帧：串行要 90 秒，并发只要十几秒
     tasks = [_one(i, total * (i + 0.5) / n) for i in range(n)]
@@ -400,9 +455,10 @@ async def _sample_range(video: Path, out_dir: Path, lo: float, hi: float,
         rc, _, _ = await _run(cmd, timeout=60)
         if not (rc == 0 and fp.exists() and fp.stat().st_size > 500):
             return None
+        fs = _fresh_score(str(fp))
         return Frame(path=str(fp), t=round(t, 2),
                      score=round(_frame_score(str(fp)), 2),
-                     faces=detect_faces(str(fp)))
+                     fresh=fs["score"], faces=detect_faces(str(fp)))
 
     tasks = [_one(i) for i in range(n)]
     res = await asyncio.gather(*tasks, return_exceptions=True)
@@ -531,7 +587,7 @@ async def has_face_in_video(video: Path, n_frames: int = 8,
             shutil.rmtree(tmp, ignore_errors=True)
 
 
-def subtitle_band(path: str, band: float = 0.30) -> float:
+def subtitle_band(path: str, band: float = 0.45) -> float:
     """检测画面【底部】烧录字幕，返回字幕带占比（0 = 没字幕）。
 
     ★ 为什么要检测：抖音/快手搜出来的视频大多带「文字口播」式硬字幕，
@@ -556,18 +612,18 @@ def subtitle_band(path: str, band: float = 0.30) -> float:
         n = len(rows)
         if n < 6:
             return 0.0
-        # 找出文字行（亮像素占比 0.02~0.55），取【最低的那行】作为字幕顶
-        hit = [i for i, r in enumerate(rows) if 0.02 <= r <= 0.55]
+        # ★ 文字行判据：亮像素【横向要够宽】（横跨画面 8% 以上）
+        #   —— 字幕是成排的字，比零散高光宽得多
+        wide = (bright.sum(axis=1) / bright.shape[1])
+        hit = [i for i, r in enumerate(rows) if 0.02 <= r <= 0.55
+               and wide[i] >= 0.08]
         if not hit:
             return 0.0
         # 连续成行更像字幕（文字通常 1~3 行）
         run = best = 0
-        for r in rows:
-            if 0.02 <= r <= 0.55:
-                run += 1
-                best = max(best, run)
-            else:
-                run = 0
+        for i in hit:
+            run += 1
+            best = max(best, run)
         if best < 1:
             return 0.0
         first = min(hit)

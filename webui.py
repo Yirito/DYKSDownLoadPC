@@ -132,6 +132,28 @@ def open_log_file() -> str:
         return f"打开失败：{str(e)[:80]}（文件在 {p}）"
 
 
+def _mk_junction(target: Path, link: Path) -> bool:
+    """在 link 处建一个指向 target 的【目录联接】（Windows mklink /J）。
+
+    ★ 为什么要：草稿文件实体必须放在剪映的草稿目录（剪映只认那儿），
+      但用户希望在自己的下载文件夹里就能看到它。
+      目录联接 = 一个「快捷方式」，两边是同一份数据，无需管理员权限。
+    """
+    target = Path(target)
+    link = Path(link)
+    if not target.exists():
+        raise RuntimeError(f"目标不存在：{target}")
+    if link.exists():
+        return True
+    link.parent.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                       capture_output=True, timeout=30,
+                       encoding="utf-8", errors="replace")
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout or "mklink 失败")[:100])
+    return True
+
+
 def set_item(idx: int, **kw) -> None:
     with _lock:
         for it in JOB["items"]:
@@ -366,7 +388,8 @@ def get_status(force: bool = False) -> list:
 
 # ------------------------------------------------------------------ 后台任务
 
-ORDER_NAME = {"like": "点赞多", "comment": "评论多", "newest": "最新", "default": "默认"}
+ORDER_NAME = {"like": "点赞多", "comment": "评论多", "newest": "最新",
+              "random": "随机", "default": "默认"}
 # ★ 搜索阶段串行锁：两个无头浏览器同时跑会互相抢 CPU
 #   （实测抖音「没搜到结果」、快手误报 400002）
 #   下载是纯 HTTP，不占浏览器 → 下载阶段不持这个锁，可以重叠
@@ -480,6 +503,13 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
         if order == "comment" and plat == "kuaishou":
             eff_order = "like"
             logline("  ⚠ 快手搜索接口不返回评论数，已改为按点赞排序", "warn")
+        if plat == "kuaishou" and order == "like":
+            # ★★ 快手按点赞排出来的全是【带货口播】（点赞最高的那种）→ 满屏人脸。
+            #   快手社区跟抖音不一样：带货号扎堆堆赞。
+            #   ⇒ 快手默认改用【最新】排序（新发的生鲜/生活类内容多）。
+            eff_order = "newest"
+            logline("  ⚠ 快手按点赞排出来的多是带货口播（人脸多），已改为按最新排序",
+                    "warn")
         picked = search_mod.sort_items(picked, eff_order)
         picked = picked[:count]
         logline(f"{PLAT_NAME[plat]} 命中 {len(items)} 条 → 下载 {len(picked)} 条"
@@ -806,6 +836,11 @@ async def make_clip_draft(videos: list[Path], keyword: str, out_root: Path,
     skipped_face = 0
     skipped_sub = 0
     # ★ 剪辑顺序：抖音先、快手后（用户要求）
+    # ★★ 同一平台内部【随机打乱】—— 用户原话：
+    #   「总会带到同一件货的，万一剪辑一模一样就不好了」
+    #   （平台顺序不动，只在各自内部随机）
+    import random as _rnd
+    _rnd.shuffle(videos)
     videos = sorted(videos, key=lambda v: 1 if "快手" in str(v.parent) else 0)
 
     for i, v in enumerate(videos, 1):
@@ -926,6 +961,14 @@ async def make_clip_draft(videos: list[Path], keyword: str, out_root: Path,
                 f"（{len(clips)}/{len(videos)} 个视频入选）")
 
     logline(f"  · 共 {len(clips)} 个片段 → 装配剪映草稿")
+    # ★ 独立点「生成剪映草稿」时（没有下载任务）→ out_root 是下载根目录，
+    #   草稿入口应该放在【最近一次下载的子目录】里，而不是根目录。
+    if not (out_root / PLAT_DIR.get("douyin", "抖音")).exists():
+        cands = [d for d in out_root.iterdir()
+                 if d.is_dir() and d.name.startswith("20")]             if out_root.exists() else []
+        if cands:
+            out_root = max(cands, key=lambda d: d.name)
+            logline(f"  · 素材目录：{out_root.name}")
     work = out_root / "_剪映草稿"
     # ★ 草稿名带时间戳：固定名字会【每次覆盖同一个草稿】，
     #   剪映草稿列表里就会留下好几份同名草稿，
@@ -933,6 +976,16 @@ async def make_clip_draft(videos: list[Path], keyword: str, out_root: Path,
     stamp = time.strftime("%m%d_%H%M")
     res = capcut_mod.build_draft(clips, work, orientation, "720p",
                                  f"{keyword}自动剪辑_{stamp}", log=logline)
+    # ★ 把草稿在【下载目录】里做一个入口（目录联接）：
+    #   文件实体还在剪映的草稿目录（剪映能正常读写），
+    #   但用户在「日期_关键词」文件夹里也能直接看到/打开这个草稿。
+    if res.get("ok") and res.get("draft_root"):
+        link_dir = out_root / f"剪映草稿_{stamp}"
+        try:
+            _mk_junction(Path(res["draft_root"]), link_dir)
+            logline(f"  · 草稿入口：{link_dir}")
+        except Exception as e:
+            logline(f"  · （没能建下载目录里的入口：{str(e)[:60]}）", "warn")
     if res.get("ok"):
         logline(f"  ✅ 剪映草稿已生成：{res.get('draft_root')}")
         logline(f"     草稿ID {res.get('draft_id')} · {res.get('shots')} 镜 · "
