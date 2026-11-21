@@ -211,6 +211,11 @@ var pendingPlat = null;
 
 function loadStatus(force) {
   fetch('/api/status' + (force ? '?force=1' : '')).then(r=>r.json()).then(function(j){
+    if (!j.items || !j.items.length) {
+      /* ★ 空结果【不清空】界面 —— 否则「登录」按钮会整个消失，
+         用户正想点登录却发现按钮没了（下载途中浏览器被占着就会这样）。 */
+      return;
+    }
     $('status').innerHTML = (j.items||[]).map(function(it){
       var cls = it.ok ? 'ok' : (it.local ? 'warn' : 'bad');
       var txt = it.ok ? '✅ 可用' : (it.local ? '⚠ 已失效' : '❌ 未就绪');

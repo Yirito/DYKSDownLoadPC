@@ -200,6 +200,12 @@ def refresh_status_async():
 
 
 def _refresh_status_worker():
+    with _lock:
+        if JOB.get("running"):
+            # ★ 任务在跑 → 浏览器正被搜索/下载占着，这时候去探测必然失败。
+            #   直接不探，保留上一次的结论（别在下载途中把状态翻脸）。
+            return
+        old = {i["plat"]: i for i in STATUS_CACHE["items"]}
     out = []
     for plat in ("douyin", "kuaishou"):
         # ★ 用 check_auth（只看登录/验证状态），不要用「必须搜到结果」当标准
@@ -207,6 +213,12 @@ def _refresh_status_worker():
             ok, why = check_sync(plat)
         except Exception as e:
             ok, why = False, f"探测异常：{type(e).__name__}: {str(e)[:80]}"
+        prev = old.get(plat)
+        if not ok and prev and prev.get("ok"):
+            # ★★ 探测失败（浏览器被别人占着 / 网络抽风）时，
+            #   【绝不推翻已知的好结论】—— 否则用户会看到
+            #   「刚才还登录好的，怎么突然说没登录」。
+            ok, why = True, prev.get("why", "")
         out.append({"plat": plat, "name": PLAT_NAME[plat], "ok": ok, "why": why,
                     "local": auth.has_local_auth(plat)})
     with _lock:
@@ -228,7 +240,10 @@ def get_status(force: bool = False) -> list:
     if (force or not fresh) and not probing:
         refresh_status_async()
     if not items and not probing:
-        _refresh_status_worker()          # 首屏：同步探一次
+        with _lock:
+            busy = bool(JOB.get("running"))
+        if not busy:
+            _refresh_status_worker()      # 首屏：同步探一次
     # ★ 刷新完必须重新读一次缓存 —— 否则返回的还是刷新【之前】的旧值
     with _lock:
         items = list(STATUS_CACHE["items"])
