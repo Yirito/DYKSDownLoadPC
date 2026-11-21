@@ -123,6 +123,13 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
       <span style="color:#8a8a84;font-weight:400;font-size:12px">下载完自动剪成 1~1.5 秒片段并生成剪映草稿</span>
     </label>
     <div class="row" id="clipBox" style="opacity:.45;pointer-events:none">
+      <div>
+        <label>剪辑来源（下载文件夹里的视频）</label>
+        <div class="chk">
+          <label><input type="checkbox" id="clipDy" checked>抖音</label>
+          <label><input type="checkbox" id="clipKs" checked>快手</label>
+        </div>
+      </div>
       <div style="max-width:170px">
         <label>单段时长（秒）</label>
         <input type="number" id="clipDur" value="1.5" min="1" max="1.5" step="0.1">
@@ -134,21 +141,32 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
           <label><input type="radio" name="clipori" value="landscape">横屏 16:9</label>
         </div>
       </div>
-      <div style="max-width:260px">
+      <div style="max-width:280px">
         <label>选段方式</label>
         <div class="chk">
           <label><input type="radio" name="aipick" value="no" checked>自动（避开黑屏/片头）</label>
           <label><input type="radio" name="aipick" value="yes">AI 精确选段</label>
         </div>
       </div>
+      <div style="max-width:300px">
+        <label>人脸处理</label>
+        <div class="chk">
+          <label><input type="radio" name="faceopt" value="skip" checked>有人脸就跳过（不露脸）</label>
+          <label><input type="radio" name="faceopt" value="keep">保留人脸</label>
+        </div>
+      </div>
     </div>
     <div class="hint">
-      不要配音、不要字幕、片段默认无音频（关闭音频）。<br>
-      「AI 精确选段」：先把候选画面抽出来交给 WorkBuddy 看，它挑出最相关的那一段（更准）。<br>
-      草稿会直接落到剪映的草稿目录，打开剪映就能看到。
+      视频条数 = <b>下载文件夹里实际有多少</b>（不强行凑数）；<br>
+      含真人的片段会被跳过，所以成片条数可能少于原视频数（这是对的）。<br>
+      不要配音、不要字幕、片段默认无音频。草稿直接落到剪映草稿目录，打开剪映就能看到。
     </div>
     <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <button class="btn ghost" id="scanClip">🔍 扫描文件夹</button>
       <button class="btn" id="mkDraft" disabled>🎬 生成剪映草稿</button>
+      <span id="clipCount" style="font-size:12px;color:#8a8a84"></span>
+    </div>
+    <div style="margin-top:6px">
       <span id="draftInfo" style="font-size:12px;color:#8a8a84"></span>
     </div>
   </div>
@@ -202,7 +220,9 @@ function currentSettings() {
            clip_enabled: $('clipEnabled').checked,
            clip_orientation: (document.querySelector('input[name=clipori]:checked')||{}).value || 'portrait',
            clip_dur: parseFloat($('clipDur').value) || 1.5,
-           ai_pick: (document.querySelector('input[name=aipick]:checked')||{}).value === 'yes' };
+           ai_pick: (document.querySelector('input[name=aipick]:checked')||{}).value === 'yes',
+           clip_dy: $('clipDy').checked, clip_ks: $('clipKs').checked,
+           faceopt: (document.querySelector('input[name=faceopt]:checked')||{}).value || 'skip' };
 }
 function applyConfig(c) {
   if (!c) return;
@@ -226,6 +246,12 @@ function applyConfig(c) {
   if (c.ai_pick) {
     var r3 = document.querySelector('input[name=aipick][value="' + (c.ai_pick ? 'yes' : 'no') + '"]');
     if (r3) r3.checked = true;
+  }
+  if (c.clip_dy !== undefined) $('clipDy').checked = !!c.clip_dy;
+  if (c.clip_ks !== undefined) $('clipKs').checked = !!c.clip_ks;
+  if (c.faceopt) {
+    var r4 = document.querySelector('input[name=faceopt][value="' + c.faceopt + '"]');
+    if (r4) r4.checked = true;
   }
   syncClipBox();
 }
@@ -268,14 +294,41 @@ $('pick').onclick = function () {
     });
 };
 
-/* 生成剪映草稿（AI 选段模式下，选段提交后点这个） */
+function clipPlats() {
+  var p = [];
+  if ($('clipDy').checked) p.push('douyin');
+  if ($('clipKs').checked) p.push('kuaishou');
+  return p;
+}
+
+/* 扫描下载文件夹里有多少视频 */
+$('scanClip').onclick = function () {
+  var b = this;
+  b.disabled = true; b.textContent = '扫描中…';
+  fetch('/api/clip/scan', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({dir: $('dir').value.trim(), plats: clipPlats()})})
+    .then(function(r){return r.json();})
+    .then(function(j){
+      $('clipCount').innerHTML = '📂 扫到 <b>' + (j.douyin||0) + '</b> 个抖音 · <b>'
+        + (j.kuaishou||0) + '</b> 个快手，合计 <b>' + (j.total||0) + '</b> 个视频';
+      $('mkDraft').disabled = !(j.total > 0);
+    })
+    .catch(function(){ $('clipCount').textContent = '扫描失败'; })
+    .finally(function(){ b.disabled = false; b.textContent = '🔍 扫描文件夹'; });
+};
+
+/* 生成剪映草稿 */
 $('mkDraft').onclick = function () {
   var b = this;
   b.disabled = true; b.textContent = '生成中…';
   var ori = (document.querySelector('input[name=clipori]:checked')||{}).value || 'portrait';
+  var ai = (document.querySelector('input[name=aipick]:checked')||{}).value === 'yes';
+  var avoid = (document.querySelector('input[name=faceopt]:checked')||{}).value === 'skip';
   fetch('/api/clip/make_draft', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({orientation: ori, dur: parseFloat($('clipDur').value) || 1.5})})
-    .then(function(){ setTimeout(function(){ b.disabled = false; }, 4000); })
+    body: JSON.stringify({dir: $('dir').value.trim(), plats: clipPlats(),
+                          orientation: ori, dur: parseFloat($('clipDur').value) || 1.5,
+                          ai_pick: ai, avoid_faces: avoid})})
+    .then(function(){ setTimeout(function(){ b.disabled = false; }, 6000); })
     .catch(function(){ b.disabled = false; });
 };
 
@@ -287,7 +340,7 @@ function syncClipBox() {
 }
 $('clipEnabled').addEventListener('change', function(){ syncClipBox(); saveConfig(); });
 ['clipDur','clipOrientation'].forEach(function(){});
-document.querySelectorAll('input[name=clipori],input[name=aipick]').forEach(function(r){
+document.querySelectorAll('input[name=clipori],input[name=aipick],input[name=faceopt],#clipDy,#clipKs').forEach(function(r){
   r.addEventListener('change', saveConfig);
 });
 $('clipDur').addEventListener('change', saveConfig);

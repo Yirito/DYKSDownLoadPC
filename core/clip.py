@@ -78,7 +78,113 @@ class Frame:
     path: str = ""
     t: float = 0.0          # 在原视频里的时间点（秒）
     score: float = 0.0      # 画面信息量分数（越大越「有内容」）
+    faces: int = 0          # ★ 画面里的人脸数量（-1 = 没检测能力，未知）
     reason: str = ""
+
+
+# ------------------------------------------------------------------ 人脸检测
+
+_face_cascade = None
+_face_ready: bool | None = None   # None=未知, True=可用, False=不可用
+# 多个级联一起用，提高召回（正脸/侧脸/变体）
+_CASCADE_NAMES = ("haarcascade_frontalface_default.xml",
+                  "haarcascade_frontalface_alt2.xml",
+                  "haarcascade_profileface.xml")
+_cascades: list = []
+
+
+def _get_cascade():
+    """加载 OpenCV 的人脸级联文件（只加载一次）。"""
+    global _face_cascade, _face_ready, _cascades
+    if _face_ready is False:
+        return None
+    if _face_cascade is not None:
+        return _face_cascade
+    try:
+        import cv2
+        for name in _CASCADE_NAMES:
+            path = os.path.join(cv2.data.haarcascades, name)
+            if not os.path.exists(path):
+                continue
+            c = cv2.CascadeClassifier(path)
+            if not c.empty():
+                _cascades.append(c)
+        _face_cascade = _cascades[0] if _cascades else None
+        _face_ready = _face_cascade is not None
+        return _face_cascade
+    except Exception:
+        _face_ready = False
+        return None
+
+
+def face_detect_available() -> bool:
+    return _get_cascade() is not None
+
+
+def _skin_ratio(bgr_img, box) -> float:
+    """框内的「肤色像素」占比。
+
+    ★ 为什么必须做这一步：Haar 级联会把【圆形带纹理的象棋棋子】误判成人脸！
+      实测「开局没马马」的纯棋盘画面被判出 1 张脸 → 最相关的画面反而被跳过。
+      真人的脸有连续的肤色区域（YCbCr 里 Cb∈[77,127]、Cr∈[133,173]），
+      棋子是红/黑/木色 → 肤色占比极低 → 可以可靠区分。
+    """
+    import cv2
+    import numpy as np
+    x, y, w, h = box
+    H, W = bgr_img.shape[:2]
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(W, x + w), min(H, y + h)
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    crop = bgr_img[y0:y1, x0:x1]
+    ycrcb = cv2.cvtColor(crop, cv2.COLOR_BGR2YCrCb)
+    # ★ OpenCV 的 YCrCb 通道顺序是 [Y, Cr, Cb]（不是 [Y, Cb, Cr]！）
+    cr = ycrcb[:, :, 1].astype(np.float32)
+    cb = ycrcb[:, :, 2].astype(np.float32)
+    mask = (cr >= 133) & (cr <= 180) & (cb >= 77) & (cb <= 130)
+    return float(mask.mean())
+
+
+def detect_faces(path: str, min_ratio: float = 0.06,
+                 skin_min: float = 0.22) -> int:
+    """检测一张图里的人脸数量（Haar 级联 + 肤色二次校验）。
+
+    ★ 为什么要这个：下载的是【别人的】素材，片段里出现真人脸容易被平台
+      判搬运/肖像侵权。所以「有人脸的帧」一律不要。
+    ★ 返回值：>=0 人脸数；**-1 = 读图失败/检测不了（未知，不是「没人脸」）**
+      —— 调用方必须把 -1 当成「不确定」，绝不能当成安全。
+    ★ ★ OpenCV 的 imread 在 Windows 上不支持中文路径（D:\\中文\\x.jpg 会读失败），
+      所以这里用 np.fromfile + cv2.imdecode。
+    """
+    if _get_cascade() is None:
+        return -1
+    try:
+        import cv2
+        import numpy as np
+        img = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            return -1                      # ★ 读不到 → 未知，不是「没人脸」
+        h, w = img.shape[:2]
+        gray = cv2.equalizeHist(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
+        msize = (max(20, int(w * min_ratio)), max(20, int(h * min_ratio)))
+        hits: list = []
+        for cas in _cascades:
+            try:
+                boxes = cas.detectMultiScale(gray, scaleFactor=1.1,
+                                             minNeighbors=5, minSize=msize)
+            except Exception:
+                boxes = []
+            for b in boxes:
+                b = tuple(int(v) for v in b)
+                if not any(abs(b[0] - o[0]) < w * 0.08 and abs(b[1] - o[1]) < h * 0.08
+                           for o in hits):
+                    hits.append(b)
+        # ★ 肤色校验：把「棋子」这类误检剔掉
+        real = [b for b in hits if _skin_ratio(img, b) >= skin_min]
+        return len(real)
+    except Exception:
+        return -1
 
 
 def _frame_score(path: str) -> float:
@@ -147,9 +253,11 @@ async def extract_frames(video: Path, out_dir: Path, fps: float = 2.5,
         cmd = [ffmpeg_exe(), "-y", "-ss", f"{t:.3f}", "-i", str(video),
                "-frames:v", "1", "-q:v", "3", "-vf", "scale=320:-2", str(fp)]
         rc, _, _ = await _run(cmd, timeout=90)
-        return (Frame(path=str(fp), t=round(t, 2),
-                      score=round(_frame_score(str(fp)), 2))
-                if (rc == 0 and fp.exists() and fp.stat().st_size > 500) else None)
+        if not (rc == 0 and fp.exists() and fp.stat().st_size > 500):
+            return None
+        return Frame(path=str(fp), t=round(t, 2),
+                     score=round(_frame_score(str(fp)), 2),
+                     faces=detect_faces(str(fp)))
 
     # ★ 并发抽帧：串行要 90 秒，并发只要十几秒
     tasks = [_one(i, total * (i + 0.5) / n) for i in range(n)]
@@ -162,18 +270,36 @@ async def extract_frames(video: Path, out_dir: Path, fps: float = 2.5,
 
 
 def pick_segment(frames: list[Frame], dur_min: float = 1.0,
-                 dur_max: float = 1.5, total: float = 0.0) -> tuple[float, float]:
+                 dur_max: float = 1.5, total: float = 0.0,
+                 avoid_faces: bool = True) -> tuple[float, float, bool]:
     """本地选段：挑信息量最高的帧，往前退一点开始，裁 dur_max 秒。
 
-    返回 (start, duration)
+    ★ avoid_faces=True 时：先排除【画面里有人脸】的帧
+      （下载的是别人的素材，露真脸会被判搬运/肖像侵权）。
+      全部候选帧都有人脸 → 返回 ok=False，这条视频整个跳过
+      —— 所以最终条数会少于原视频数，这是预期行为。
+
+    返回 (start, duration, ok)
     """
     if not frames:
-        return 0.0, dur_max
-    best = max(frames, key=lambda f: f.score)
+        return 0.0, dur_max, False
+    pool = frames
+    if avoid_faces:
+        clean = [f for f in frames if f.faces == 0]
+        if not clean:
+            # 全都有人脸（或者检测不可用时 faces=-1 → 视为未知，放行）
+            unknown = [f for f in frames if f.faces < 0]
+            if unknown:
+                pool = unknown
+            else:
+                return 0.0, dur_max, False
+        else:
+            pool = clean
+    best = max(pool, key=lambda f: f.score)
     start = max(0.0, best.t - 0.35)
     if total and start + dur_max > total:
         start = max(0.0, total - dur_max)
-    return round(start, 2), dur_max
+    return round(start, 2), dur_max, True
 
 
 # ------------------------------------------------------------------ 裁片段

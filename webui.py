@@ -397,6 +397,36 @@ AI_PICK: dict = {}
 CLIP_PENDING: dict = {}
 
 
+PLAT_DIRNAME = {"douyin": "抖音", "kuaishou": "快手"}
+
+
+def scan_media(dl_dir: Path, plats: list[str]) -> dict:
+    """扫描下载目录，找出各平台子目录下的所有视频。
+
+    下载目录结构：<下载目录>/<日期_关键字>/抖音/*.mp4、同级 快手/*.mp4
+    ⇒ 递归找名为「抖音」「快手」的目录，把里面的视频都收集起来。
+    """
+    out = {"douyin": [], "kuaishou": [], "roots": []}
+    if not dl_dir or not Path(dl_dir).exists():
+        return out
+    root = Path(dl_dir)
+    seen_dirs = set()
+    for p in root.rglob("*"):
+        if not p.is_dir() or p.name not in PLAT_DIRNAME.values():
+            continue
+        key = str(p).lower()
+        if key in seen_dirs:
+            continue
+        seen_dirs.add(key)
+        plat = next(k for k, v in PLAT_DIRNAME.items() if v == p.name)
+        vids = sorted([f for f in p.iterdir()
+                       if f.is_file() and f.suffix.lower() in (".mp4", ".mov", ".mkv")])
+        if vids:
+            out[plat].extend(vids)
+            out["roots"].append(str(p))
+    return out
+
+
 async def prepare_ai_clips(videos: list[Path], keyword: str, out_root: Path,
                            logline) -> None:
     """AI 模式：只抽帧并登记成「待选段」，让 AI 看完再生成草稿。"""
@@ -426,6 +456,47 @@ async def prepare_ai_clips(videos: list[Path], keyword: str, out_root: Path,
             "选完点页面上的「🎬 生成剪映草稿」", "warn")
 
 
+async def run_clip_job(dl_dir: Path, plats: list[str], orientation: str,
+                       dur: float, avoid_faces: bool, ai_pick: bool,
+                       logline) -> dict:
+    """按【下载文件夹里的视频】做剪映剪辑。
+
+    ★ 视频条数 = 文件夹里实际有多少（不强行凑数）；
+      有人脸的片段会被跳过，所以最终可能少于原数。
+    """
+    media = scan_media(dl_dir, plats)
+    # ★ 只取用户勾选的平台
+    videos = []
+    for k in ("douyin", "kuaishou"):
+        if k in plats:
+            videos.extend(media[k])
+    if not videos:
+        return {"ok": False, "msg": "下载目录里没找到视频（先下载一批再来剪）"}
+    names = "、".join(PLAT_NAME[p] for p in plats)
+    logline(f"🎬 扫描到 {len(videos)} 个视频（{names}）")
+    for k in ("douyin", "kuaishou"):
+        if k in plats and media[k]:
+            logline(f"    {PLAT_NAME[k]}：{len(media[k])} 个")
+    if not clip_mod_available():
+        logline("  ⚠ 没有 ffmpeg / 人脸检测能力，跳过剪辑", "warn")
+        return {"ok": False, "msg": "缺少 ffmpeg 或人脸检测能力"}
+    import clip as clip_mod
+    root = Path(dl_dir)
+    if ai_pick:
+        await prepare_ai_clips(videos, "", root, logline)
+        return {"ok": True, "pending": len(videos), "msg": "已抽出候选画面，等待 AI 选段"}
+    return await make_clip_draft(videos, "", root, orientation, dur,
+                                 False, logline, avoid_faces=avoid_faces)
+
+
+def clip_mod_available() -> bool:
+    try:
+        import clip as clip_mod
+        return bool(clip_mod.ffmpeg_exe())
+    except Exception:
+        return False
+
+
 async def make_draft_from_pending(orientation: str, dur: float,
                                   logline) -> dict:
     """把待选段的视频裁成片段并装配成草稿（AI 选段结果优先，没有就用本地选段）。"""
@@ -447,7 +518,7 @@ async def make_draft_from_pending(orientation: str, dur: float,
 
 async def make_clip_draft(videos: list[Path], keyword: str, out_root: Path,
                           orientation: str, dur: float, ai_pick: bool,
-                          logline) -> None:
+                          logline, avoid_faces: bool = True) -> None:
     """抽帧 → 选段 → 裁出 1-1.5 秒片段 → 装配成剪映草稿。
 
     选段两条路：
@@ -462,6 +533,7 @@ async def make_clip_draft(videos: list[Path], keyword: str, out_root: Path,
     clips_dir = out_root / "_剪映片段"
     clips_dir.mkdir(parents=True, exist_ok=True)
     clips: list[dict] = []
+    skipped_face = 0
 
     for i, v in enumerate(videos, 1):
         logline(f"  [{i}/{len(videos)}] 分析画面：{v.name[:30]}")
@@ -496,8 +568,19 @@ async def make_clip_draft(videos: list[Path], keyword: str, out_root: Path,
             idx = frames.index(best)
             how = f"本地选帧（信息量 {best.score:.1f}）"
 
-        start, d = clip_mod.pick_segment([frames[idx]], max(0.5, dur - 0.5),
-                                         dur, total)
+        # ★ 有人脸 → 换一帧；整条视频都没有无人脸帧 → 跳过这条视频
+        cand = [f for f in frames if (not avoid_faces or f.faces <= 0)]
+        if not cand:
+            logline(f"      ⚠ 全片都有露脸画面，跳过这条（{v.stem[:20]}）", "warn")
+            skipped_face += 1
+            continue
+        best = max(cand, key=lambda f: f.score)
+        idx = frames.index(best)
+        how = f"选帧 {best.t:.1f}s" + ("（有人脸，已避开）" if best.faces > 0 else "")
+        start, d, ok2 = clip_mod.pick_segment([best], max(0.5, dur - 0.5),
+                                              dur, total, avoid_faces=False)
+        if not ok2:
+            continue
         out = clips_dir / f"{i:02d}_{v.stem[:24]}.mp4"
         ok, msg = await clip_mod.cut_clip(v, start, d, out, orientation)
         if not ok:
@@ -510,6 +593,8 @@ async def make_clip_draft(videos: list[Path], keyword: str, out_root: Path,
     if not clips:
         logline("  ⚠ 没有可用片段，未生成草稿", "warn")
         return
+    if skipped_face:
+        logline(f"  · 因含人脸跳过 {skipped_face} 个片段（{len(clips)}/{len(videos)} 个视频入选）")
 
     logline(f"  · 共 {len(clips)} 个片段 → 装配剪映草稿")
     work = out_root / "_剪映草稿"
@@ -662,15 +747,28 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=_do, daemon=True).start()
             self._json({"ok": True})
             return
+        if p == "/api/clip/scan":
+            dl = body.get("dir") or ""
+            plats = body.get("plats") or ["douyin", "kuaishou"]
+            m = scan_media(Path(dl), plats)
+            n_dy = len(m["douyin"]) if "douyin" in plats else 0
+            n_ks = len(m["kuaishou"]) if "kuaishou" in plats else 0
+            self._json({"douyin": n_dy, "kuaishou": n_ks, "total": n_dy + n_ks})
+            return
         if p == "/api/clip/make_draft":
             orientation = body.get("orientation") or "portrait"
             dur = max(1.0, min(1.5, float(body.get("dur") or 1.5)))
+            plats = body.get("plats") or ["douyin", "kuaishou"]
+            avoid_faces = body.get("avoid_faces", True)
+            ai_pick = bool(body.get("ai_pick"))
+            dl = body.get("dir") or ""
             res_holder = {}
 
             def _mk():
                 try:
-                    res_holder["r"] = asyncio.run(
-                        make_draft_from_pending(orientation, dur, logline))
+                    res_holder["r"] = asyncio.run(run_clip_job(
+                        Path(dl), plats, orientation, dur, avoid_faces, ai_pick,
+                        logline))
                 except Exception as e:
                     # ★ 失败一定要写日志，否则用户只看到「点了没反应」
                     logline(f"  ❌ 生成草稿失败：{type(e).__name__}: {str(e)[:150]}", "err")
