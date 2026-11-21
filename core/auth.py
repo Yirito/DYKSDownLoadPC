@@ -455,11 +455,13 @@ def _chrome_running() -> bool:
 class BrowserSession:
     """一次浏览器会话（可能是 CDP 连上的用户浏览器，也可能是程序开的独立浏览器）。"""
 
-    def __init__(self, ctx, browser=None, owned: bool = True, how: str = ""):
+    def __init__(self, ctx, browser=None, owned: bool = True, how: str = "",
+                 profile: str = ""):
         self.ctx = ctx
         self.browser = browser
         self.owned = owned          # owned=True → 关闭时要真的关掉
         self.how = how              # 说明用的哪种方式
+        self.profile = profile      # 实际用的 profile 名（释放时要准）
 
     async def close(self):
         try:
@@ -490,7 +492,8 @@ async def open_browser(pw, plat: str, headless: bool = True,
         BROWSER_HINT["kind"] = ""
         if cdp:
             try:
-                browser = await pw.chromium.connect_over_cdp(cdp)
+                browser = await asyncio.wait_for(
+                    pw.chromium.connect_over_cdp(cdp), timeout=15)
                 ctx = browser.contexts[0] if browser.contexts else \
                     await browser.new_context()
                 return BrowserSession(ctx, browser, owned=False,
@@ -499,24 +502,27 @@ async def open_browser(pw, plat: str, headless: bool = True,
                 pass
         # ② 用用户自己的浏览器 profile（要求那个浏览器没在运行 —— 开着会锁 profile）
         up = _user_browser_profile(prefer_browser)
-        if up and not _chrome_running():
-            try:
-                ctx = await pw.chromium.launch_persistent_context(
-                    user_data_dir=str(up), headless=headless, channel="chrome",
-                    args=["--disable-blink-features=AutomationControlled",
-                          "--no-sandbox", "--profile-directory=Default"],
-                    viewport={"width": 1440, "height": 900}, locale="zh-CN",
-                    user_agent=UA_DESKTOP)
-                return BrowserSession(ctx, None, owned=True,
-                                      how=f"用你日常的浏览器登录态（{up}）")
-            except Exception:
-                pass
-        if up and _chrome_running():
-            BROWSER_HINT["kind"] = "running"
+        # ② ★★★ 用户自己的浏览器 profile：【已废弃，不要用】
+        #   实测 2026-11-21：用用户的 Chrome profile 启动 playwright
+        #   90 秒都起不来（profile 被锁 / 首次启动要迁移），
+        #   会把整个界面卡在「检测中…」几十分钟。
+        #   而且它返回的会话没带 profile 名 → 主 profile 永远不释放
+        #   → 搜索拿不到有登录态的 profile → 一直转圈。
+        #   ★ 想复用同一个浏览器，唯一可靠的办法是【CDP 连接】（上面 ①）：
+        #     用 chrome.exe --remote-debugging-port=9222 启动浏览器，
+        #     程序直接连进去在他窗口里开标签页。
+        up = _user_browser_profile(prefer_browser)
+        if up:
+            BROWSER_HINT["kind"] = "profile-unavailable"
             BROWSER_HINT["profile"] = str(up)
     # ③ 兜底：程序自己的独立 profile
-    ctx = await _open_ctx(pw, plat, prof, headless=headless)
-    return BrowserSession(ctx, None, owned=True, how="程序独立浏览器")
+    try:
+        ctx = await asyncio.wait_for(
+            _open_ctx(pw, plat, prof, headless=headless), timeout=45)
+    except asyncio.TimeoutError:
+        raise RuntimeError("浏览器启动超时（45 秒）") from None
+    return BrowserSession(ctx, None, owned=True, how="程序独立浏览器",
+                          profile=prof)
 
 
 async def _open_ctx(pw, plat: str, prof: str, headless: bool):
@@ -591,8 +597,18 @@ async def check_auth_in_browser(plat: str, use_cache: bool = True) -> tuple[bool
                                    "（任务管理器里结束 chrome.exe 再试）")
                 return False, f"浏览器探测异常：{msg[:80]}"
             finally:
+                # ★ 用【实际用的】profile 名释放。
+                #   （之前误用 _pick_profile() 再取一次 —— 那是「分配」，
+                #     会把主 profile 又占走 → 搜索只能拿没登录态的备用 → 一直转圈）
+                prof_name = sess.profile
                 await sess.close()
-                _release_profile(_pick_profile("dy" if plat == "douyin" else "ks"))
+                if prof_name:
+                    try:
+                        from engine import wait_profile_free
+                        wait_profile_free(prof_name, timeout=6)
+                    except Exception:
+                        pass
+                    _release_profile(prof_name)
     finally:
         _probe_lock.release()
 

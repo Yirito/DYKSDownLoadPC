@@ -55,6 +55,21 @@ _PROFILE_DIR = Path(__file__).resolve().parent.parent / "profiles"
 _profiles_in_use = set()
 
 
+def _profile_busy(prof: str) -> bool:
+    """这个 profile 是不是正被 Chrome 占着。
+
+    ★ Chrome 在 user_data_dir 里放 SingletonLock 锁文件，
+      进程没退干净时锁文件还在 → 新的 launch 会卡死/失败。
+      实测：残留 11 个 chrome.exe → 搜索拿到被占的备用 profile
+      → 一直转圈 120 秒。所以必须看【真实锁状态】，不能只看内存集合。
+    """
+    d = _PROFILE_DIR / prof
+    if not d.exists():
+        return False
+    return any((d / n).exists() for n in
+               ("SingletonLock", "SingletonCookie", "SingletonSocket"))
+
+
 def _pick_profile(base: str) -> str:
     """挑一个没被占用的 profile 名；全占了就再退一档。
 
@@ -62,8 +77,13 @@ def _pick_profile(base: str) -> str:
       被占用时 launch 会直接失败。以前的做法是【排队等】，
       结果用户的解析被拖慢十几秒（表现为「点 ✕ 后再解析变慢」）。
       现在改成【换用备用 profile】→ 永不排队。
-      备用 profile 同样是匿名态（照旧 clear_cookies），不影响正确性。
+    ★ ★ 再加一层：【真实锁文件检查】—— 残留的 chrome.exe 会留下
+      SingletonLock，光看内存集合不够（残留进程是另一个进程留下的）。
     """
+    for cand in (base, base + "_alt", base + "_alt2"):
+        if cand not in _profiles_in_use and not _profile_busy(cand):
+            _profiles_in_use.add(cand)
+            return cand
     for cand in (base, base + "_alt", base + "_alt2"):
         if cand not in _profiles_in_use:
             _profiles_in_use.add(cand)
@@ -75,6 +95,45 @@ def _pick_profile(base: str) -> str:
 
 def _release_profile(name: str) -> None:
     _profiles_in_use.discard(name)
+
+
+def acquire_profile(base: str, wait: float = 10.0) -> str:
+    """申请一个可用的 profile（优先等【主 profile】空出来）。
+
+    ★ 为什么不能直接用 _pick_profile：它每次调用都会【占用】一个 profile，
+      在候选循环里反复调用会自己把自己挤到第三档备用 profile
+      （实测搜索因此拿到没登录态的 dy_alt2 → 一直搜不到东西）。
+    ★ 逻辑：主 profile 只是被【别人正在用】时，等它一会儿（最多 wait 秒）；
+      真的被残留进程锁住（真实锁文件）才换备用。
+    """
+    import time as _t
+    t0 = _t.time()
+    cands = [base, base + "_alt", base + "_alt2"]
+    while _t.time() - t0 < wait:
+        for c in cands:
+            if c not in _profiles_in_use and not _profile_busy(c):
+                _profiles_in_use.add(c)
+                return c
+        _t.sleep(0.5)
+    # 等不到就按老规矩分配（_pick_profile 本身不会再多占用）
+    return _pick_profile(base)
+
+
+def wait_profile_free(name: str, timeout: float = 12.0) -> bool:
+    """等 profile 的【真实锁】消失（Chrome 进程退干净了才算释放）。
+
+    ★ 为什么必须等：ctx.close() 只是关窗口，Chrome 进程还要几秒才退出，
+      这期间 SingletonLock 还在 → 下一个任务拿到这个 profile 会启动失败/卡死。
+      实测：探测刚结束就搜索 → 搜索改用没有登录态的备用 profile
+      → 反复超时重试 3 轮 = 界面「一直转圈」100 多秒。
+    """
+    import time as _t
+    t0 = _t.time()
+    while _t.time() - t0 < timeout:
+        if not _profile_busy(name):
+            return True
+        _t.sleep(0.5)
+    return not _profile_busy(name)
 
 # ★ UA 池：每次解析随机换一个，降低被风控按指纹命中的概率
 UA_POOL = [

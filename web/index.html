@@ -411,6 +411,28 @@ $('settingsModal').onclick = function (e) {
 fetch('/api/browser_info', {method:'POST', headers:{'Content-Type':'application/json'},
   body: JSON.stringify({ua: navigator.userAgent})}).catch(function(){});
 
+/* 浏览器复用状态提示 */
+function refreshBrowserHint() {
+  fetch('/api/browser_hint').then(function(r){return r.json();}).then(function(j){
+    var el = $('browserHint');
+    if (!el) return;
+    var h = j.hint || {};
+    var name = j.prefer === 'edge' ? 'Edge' : (j.prefer === 'chrome' ? 'Chrome' : '');
+    if (h.cdp) {
+      el.innerHTML = '🔗 登录会直接用<b>你正在运行的浏览器</b>（调试端口 ' +
+        h.cdp.replace('http://127.0.0.1:','') + '）开新标签页，登录态完全一致。';
+    } else {
+      el.innerHTML = '🔗 想让登录<b>直接在你正在用的浏览器里</b>开标签页（登录态完全共享）：<br>' +
+        '用这个命令启动浏览器 → <code style="font-size:12px">' +
+        (name === 'Edge' ? 'msedge.exe --remote-debugging-port=9222'
+                         : 'chrome.exe --remote-debugging-port=9222') +
+        '</code><br>' +
+        '<span style="opacity:.75">不这么做的话，程序会用自己的独立浏览器（要单独登录一次）。</span>';
+    }
+  }).catch(function(){});
+}
+refreshBrowserHint();
+
 /* 剪映剪辑开关：启用后放开选项区 */
 function syncClipBox() {
   var on = $('clipEnabled').checked;
@@ -566,17 +588,23 @@ setInterval(poll, 1000);
 /* 状态检测：还在「检测中…」时每 2 秒探一次，拿到结果后回到 15 秒一次。
    （首次探测要开浏览器，几秒才出结果；干等 15 秒太慢） */
 var statusTimer = null;
+var statusTicks = 0;
 function scheduleStatus() {
   if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
   var tick = function () {
     loadStatus(true);
-    var pending = document.querySelector('#status .st') &&
-                  /检测中/.test(document.querySelector('#status').textContent);
-    if (pending) {
-      statusTimer = setTimeout(tick, 2000);
-    } else {
-      statusTimer = setTimeout(tick, 15000);
+    var txt = document.querySelector('#status').textContent || '';
+    var pending = /检测中/.test(txt);
+    statusTicks = pending ? statusTicks + 1 : 0;
+    if (pending && statusTicks >= 20) {
+      /* ★ 检测太久（>40 秒）→ 明说，别一直转圈让人以为死了 */
+      document.querySelector('#status').innerHTML =
+        '<span class="st warn">⚠ 检测超时（40 秒）'
+        + '<button class="btn ghost" onclick="location.reload()">重新检测</button></span>';
+      statusTimer = setTimeout(tick, 10000);
+      return;
     }
+    statusTimer = setTimeout(tick, pending ? 2000 : 15000);
   };
   statusTimer = setTimeout(tick, 200);
 }

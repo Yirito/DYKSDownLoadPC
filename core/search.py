@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from urllib.parse import quote
 
 from auth import AuthExpired, _extract_awemes, _extract_feeds
-from engine import (UA_DESKTOP, UA_MOBILE, _PROFILE_DIR, _pick_profile,
+from engine import (UA_DESKTOP, UA_MOBILE, _PROFILE_DIR, _pick_profile, acquire_profile,
                     _release_profile)
 
 PLAT_NAME = {"douyin": "抖音", "kuaishou": "快手"}
@@ -316,13 +316,20 @@ async def search(plat: str, keyword: str, limit: int = 30,
     last_exc = None
     for attempt in range(retries + 1):
         try:
-            r = await _search_once(plat, keyword, limit, headless)
+            # ★ 每轮搜索加超时：浏览器/网络卡死时要能失败退出，
+            #   不能让界面一直转圈
+            r = await asyncio.wait_for(
+                _search_once(plat, keyword, limit, headless), timeout=120)
             if r:
                 return r
             if attempt < retries:
                 await asyncio.sleep(4 + attempt * 3)
         except AuthExpired:
             raise
+        except asyncio.TimeoutError:
+            last_exc = RuntimeError("搜索超时（120 秒）")
+            if attempt < retries:
+                await asyncio.sleep(2)
         except Exception as e:
             last_exc = e
             if attempt < retries:
@@ -335,29 +342,34 @@ async def search(plat: str, keyword: str, limit: int = 30,
 async def _search_once(plat: str, keyword: str, limit: int,
                         headless: bool) -> list[Item]:
     from playwright.async_api import async_playwright
-    prof = _pick_profile("dy" if plat == "douyin" else "ks")
+    base = "dy" if plat == "douyin" else "ks"
+    # ★ 用 acquire_profile：等主 profile 空出来（探测刚结束时），
+    #   不会自己把自己挤到没登录态的备用 profile
+    prof = acquire_profile(base, wait=12)
     try:
         async with async_playwright() as pw:
-            if plat == "douyin":
-                ctx = await pw.chromium.launch_persistent_context(
+            # ★ 启动加超时：被残留进程锁住的 profile 会卡死，
+            #   不能拿它死等 120 秒
+            ctx = await asyncio.wait_for(
+                pw.chromium.launch_persistent_context(
                     user_data_dir=str(_PROFILE_DIR / prof), headless=headless,
                     channel="chrome",
-                    args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+                    args=["--disable-blink-features=AutomationControlled",
+                          "--no-sandbox"],
                     viewport={"width": 1440, "height": 900}, locale="zh-CN",
-                    user_agent=UA_DESKTOP)
-            else:
-                # ★ 快手也用【网页版 + 桌面 UA】—— 手机版页面弹出来给用户登录很怪
-                ctx = await pw.chromium.launch_persistent_context(
-                    user_data_dir=str(_PROFILE_DIR / prof), headless=headless,
-                    channel="chrome",
-                    args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-                    viewport={"width": 1440, "height": 900}, locale="zh-CN",
-                    user_agent=UA_DESKTOP)
+                    user_agent=UA_DESKTOP),
+                timeout=35)
+            print(f"  [search] {plat} 用 profile={prof} 启动成功")
             try:
                 if plat == "douyin":
                     return await _search_douyin(ctx, keyword, limit)
                 return await _search_kuaishou(ctx, keyword, limit)
             finally:
                 await ctx.close()
+    except asyncio.TimeoutError:
+        raise RuntimeError(f"浏览器启动超时（{prof}）") from None
     finally:
         _release_profile(prof)
+    if last_err:
+        raise last_err
+    return []

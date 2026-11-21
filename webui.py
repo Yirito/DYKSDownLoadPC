@@ -55,6 +55,8 @@ _lock = threading.Lock()
 
 # ── 登录/验证状态缓存（避免每次刷新都真发网络请求，把机器打爆）──
 STATUS_CACHE: dict = {"items": [], "at": 0.0}
+# 上次发起探测的时间（限流用，防止前端轮询造成「探测风暴」）
+_last_probe_at = [0.0]
 STATUS_TTL = 90.0          # 90 秒内复用缓存（每次探测要开一次浏览器）
 _status_thread = None
 
@@ -196,10 +198,19 @@ def probe_sync(plat: str):
         return False, str(e)[:80]
 
 
-def check_sync(plat: str):
-    """登录/验证状态 —— 必须走浏览器拿真实 cookie（磁盘上的值是加密的）。"""
+def check_sync(plat: str, timeout: float = 40.0):
+    """登录/验证状态 —— 必须走浏览器拿真实 cookie（磁盘上的值是加密的）。
+
+    ★ 加超时：浏览器启动卡死（用户的 Chrome profile 被锁等）时，
+      不能让界面永远停在「检测中…」，超时就如实报「检测超时」。
+    """
+    async def _go():
+        return await asyncio.wait_for(auth.check_auth_in_browser(plat),
+                                      timeout=timeout)
     try:
-        return asyncio.run(auth.check_auth_in_browser(plat))
+        return asyncio.run(_go())
+    except asyncio.TimeoutError:
+        return False, f"检测超时（{int(timeout)} 秒），浏览器可能没起来"
     except Exception as e:
         return False, str(e)[:80]
 
@@ -268,12 +279,24 @@ def get_status(force: bool = False) -> list:
         fresh = (time.time() - STATUS_CACHE["at"]) < STATUS_TTL
         items = list(STATUS_CACHE["items"])
         probing = bool(_status_thread and _status_thread.is_alive())
-    if (force or not fresh) and not probing:
+    # ★★ 探测要限流！前端在「检测中」时每 2 秒请求一次 status，
+    #   而每次请求都会 force=true → 每次都重启探测线程 → 探测风暴
+    #   → profile 被反复占用 → 下载/搜索拿不到有登录态的那个 → 一直转圈。
+    #   ⇒ 两次探测之间至少隔 8 秒。
+    now = time.time()
+    with _lock:
+        last_probe = _last_probe_at[0]
+    may_probe = (now - last_probe) > 8.0
+    if (force or not fresh) and not probing and may_probe:
+        with _lock:
+            _last_probe_at[0] = time.time()
         refresh_status_async()
-    if not items and not probing:
+    if not items and not probing and may_probe:
         with _lock:
             busy = bool(JOB.get("running"))
         if not busy:
+            with _lock:
+                _last_probe_at[0] = time.time()
             _refresh_status_worker()      # 首屏：同步探一次
     # ★ 刷新完必须重新读一次缓存 —— 否则返回的还是刷新【之前】的旧值
     with _lock:
@@ -295,6 +318,16 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
     ★ 不再自动弹浏览器要求登录 —— 登录由界面上的「登录」按钮手动触发，
       这里发现没登录就跳过该平台并提示。
     """
+    # ★ 等后台状态探测结束：它正占着浏览器 profile，
+    #   不等的话下载只能改用没登录态的备用 profile → 慢一倍还搜不到东西。
+    global _status_thread
+    if _status_thread and _status_thread.is_alive():
+        logline("等待状态检测完成…")
+        for _ in range(40):                 # 最多等 20 秒
+            if not _status_thread.is_alive():
+                break
+            await asyncio.sleep(0.5)
+
     out_root = dl_dir / f"{today_cn()}_{safe_name(keyword, 40)}"
     for p in plats:
         (out_root / PLAT_DIR[p]).mkdir(parents=True, exist_ok=True)
@@ -303,34 +336,26 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
                     "out_root": str(out_root), "done": 0, "total": 0, "error": ""})
     logline(f"输出目录：{out_root}")
 
-    # ★★ 两个平台【并行搜索】—— 原来串行要等 40~60 秒才开始下载。
-    #   抖音用 dy profile、快手用 ks profile，不同目录不会互相打架。
-    async def _do_search(plat):
+    # ★★ 搜索【串行】—— 实测并行会互相干扰：
+    #   两个浏览器同时启动抢 CPU，抖音会「没搜到结果」、快手会误报 400002；
+    #   单独搜抖音只要 5.9 秒就有 7 条，并行反而全废（还卡了 95 秒）。
+    #   串行 + 「够数就走」的优化 ≈ 12 秒开始下载，比并行的 95 秒好得多。
+    idx = 0
+    done_videos: list[Path] = []
+    for plat in plats:
+        with _lock:
+            JOB["phase"] = f"搜索 {PLAT_NAME[plat]}"
+        logline(f"正在搜索 {PLAT_NAME[plat]}：{keyword}")
         try:
             # ★ limit 别贪多：第一页通常就有 10 条，要太多就得一直滚动等分页
             #   （搜索慢的大头）。留一点余量给竖屏过滤就够了。
-            items = await search_mod.search(plat, keyword,
-                                            limit=max(count + 5, count * 2))
-            return plat, items, None
+            items = await search_mod.search(
+                plat, keyword, limit=max(count + 5, count * 2))
+            err = None
         except auth.AuthExpired as e:
-            return plat, [], e
+            items, err = [], e
         except Exception as e:
-            return plat, [], e
-
-    logline(f"正在搜索：{'、'.join(PLAT_NAME[p] for p in plats)}（并行）")
-    with _lock:
-        JOB["phase"] = "搜索中"
-    search_res = await asyncio.gather(*[_do_search(p) for p in plats],
-                                      return_exceptions=True)
-
-    idx = 0
-    done_videos: list[Path] = []
-    for r in search_res:
-        if isinstance(r, BaseException):
-            plat = plats[0]
-            items, err = [], r
-        else:
-            plat, items, err = r
+            items, err = [], e
         # ★ 不再【预先探测登录态】—— 预检查会误判（探测口径和搜索口径不一致，
         #   于是出现「状态栏说可用、下载却提示待登录」）。
         #   直接开搜：搜索接口自己会告诉我们要不要登录/验证（AuthExpired），
@@ -698,6 +723,18 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"))
 
     def do_GET(self):
+        p = self.path.split("?")[0]
+        if p == "/api/debug_profiles":
+            from engine import _profiles_in_use, _profile_busy, _PROFILE_DIR
+            info = {}
+            for name in ("dy", "dy_alt", "dy_alt2", "ks", "ks_alt", "ks_alt2"):
+                d = _PROFILE_DIR / name
+                info[name] = {"in_use": name in _profiles_in_use,
+                              "locked": _profile_busy(name),
+                              "exists": d.exists()}
+            self._json({"in_use": sorted(_profiles_in_use), "detail": info,
+                        "probing": bool(_status_thread and _status_thread.is_alive())})
+            return
         u = urlparse(self.path)
         p = u.path
         qs = parse_qs(u.query)
