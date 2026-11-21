@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -381,6 +382,143 @@ def _login_url(plat: str) -> str:
     return "https://www.kuaishou.com/search/video?searchKey=test"
 
 
+# ------------------------------------------------------------------ 浏览器复用
+# ★ 用户诉求：登录/检测都用【他自己正在用的那个浏览器】，
+#   而不是程序另开一个（那样登录态两套，用户要重复登录）。
+# 优先级：
+#   ① CDP 连接【已运行的 Chrome】（有调试端口时）—— 完全复用，零污染
+#   ② 用用户 Chrome 的 profile 目录启动（要求 Chrome 没在运行）
+#   ③ 兜底：程序自己的独立 profile（跟现在的行为一致）
+
+_CDP_PORTS = (9222, 9223, 9333, 9515)
+
+
+def _cdp_url() -> str | None:
+    """探测本机已运行的 Chrome 调试端口（用户带 --remote-debugging-port 启动的）。"""
+    import urllib.request
+    for port in _CDP_PORTS:
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/json/version", timeout=1) as r:
+                if r.status == 200:
+                    return f"http://127.0.0.1:{port}"
+        except Exception:
+            continue
+    return None
+
+
+# 网页端上报的「用户正在用的浏览器」（前端 navigator.userAgent 解析出来的）
+PREFER_BROWSER: dict = {"kind": "", "ua": ""}
+# 浏览器使用情况（给界面显示提示用）
+BROWSER_HINT: dict = {"kind": "", "profile": "", "cdp": ""}
+
+_BROWSER_PROFILE_DIRS = {
+    "chrome": ("Google", "Chrome", "User Data"),
+    "edge": ("Microsoft", "Edge", "User Data"),
+}
+
+
+def _user_browser_profile(kind: str = "") -> Path | None:
+    """用户自己的 Chrome / Edge 用户数据目录（用它就等于用他日常的浏览器登录态）。
+
+    kind: "chrome" / "edge" / ""（自动挑一个存在的）
+    """
+    local = os.environ.get("LOCALAPPDATA") or ""
+    if not local:
+        return None
+    order = [kind] if kind in _BROWSER_PROFILE_DIRS else list(_BROWSER_PROFILE_DIRS)
+    for k in order:
+        parts = _BROWSER_PROFILE_DIRS[k]
+        d = Path(local).joinpath(*parts)
+        if d.exists():
+            return d
+    return None
+
+
+def _chrome_running() -> bool:
+    """Chrome/Edge 是否正在运行（运行中就不能直接开它的 profile）。"""
+    import subprocess
+    try:
+        r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq chrome.exe"],
+                           capture_output=True, timeout=10,
+                           encoding="utf-8", errors="replace")
+        if "chrome.exe" in (r.stdout or "").lower():
+            return True
+        r2 = subprocess.run(["tasklist", "/FI", "IMAGENAME eq msedge.exe"],
+                            capture_output=True, timeout=10,
+                            encoding="utf-8", errors="replace")
+        return "msedge.exe" in (r2.stdout or "").lower()
+    except Exception:
+        return False
+
+
+class BrowserSession:
+    """一次浏览器会话（可能是 CDP 连上的用户浏览器，也可能是程序开的独立浏览器）。"""
+
+    def __init__(self, ctx, browser=None, owned: bool = True, how: str = ""):
+        self.ctx = ctx
+        self.browser = browser
+        self.owned = owned          # owned=True → 关闭时要真的关掉
+        self.how = how              # 说明用的哪种方式
+
+    async def close(self):
+        try:
+            if self.owned:
+                await self.ctx.close()
+            else:
+                # CDP 接来的：只关我们自己开的标签页，不动用户的浏览器
+                for pg in list(self.ctx.pages):
+                    pass
+                if self.browser:
+                    await self.browser.close()
+        except Exception:
+            pass
+
+
+async def open_browser(pw, plat: str, headless: bool = True,
+                       prefer_user: bool = True,
+                       prefer_browser: str = "") -> BrowserSession:
+    """开一个浏览器会话。
+
+    ★ prefer_user=True 时优先复用用户自己的浏览器（CDP → 他的 profile）。
+    """
+    prof = _pick_profile("dy" if plat == "douyin" else "ks")
+    # ① CDP：连到用户正在跑的 Chrome（登录态直接共享）
+    if prefer_user:
+        cdp = _cdp_url()
+        BROWSER_HINT["cdp"] = cdp or ""
+        BROWSER_HINT["kind"] = ""
+        if cdp:
+            try:
+                browser = await pw.chromium.connect_over_cdp(cdp)
+                ctx = browser.contexts[0] if browser.contexts else \
+                    await browser.new_context()
+                return BrowserSession(ctx, browser, owned=False,
+                                      how=f"已连接你正在运行的 Chrome（{cdp}）")
+            except Exception:
+                pass
+        # ② 用用户自己的浏览器 profile（要求那个浏览器没在运行 —— 开着会锁 profile）
+        up = _user_browser_profile(prefer_browser)
+        if up and not _chrome_running():
+            try:
+                ctx = await pw.chromium.launch_persistent_context(
+                    user_data_dir=str(up), headless=headless, channel="chrome",
+                    args=["--disable-blink-features=AutomationControlled",
+                          "--no-sandbox", "--profile-directory=Default"],
+                    viewport={"width": 1440, "height": 900}, locale="zh-CN",
+                    user_agent=UA_DESKTOP)
+                return BrowserSession(ctx, None, owned=True,
+                                      how=f"用你日常的浏览器登录态（{up}）")
+            except Exception:
+                pass
+        if up and _chrome_running():
+            BROWSER_HINT["kind"] = "running"
+            BROWSER_HINT["profile"] = str(up)
+    # ③ 兜底：程序自己的独立 profile
+    ctx = await _open_ctx(pw, plat, prof, headless=headless)
+    return BrowserSession(ctx, None, owned=True, how="程序独立浏览器")
+
+
 async def _open_ctx(pw, plat: str, prof: str, headless: bool):
     """按平台建浏览器上下文（抖音桌面 UA，快手也用桌面 UA 走网页版）。"""
     if plat == "douyin":
@@ -426,11 +564,13 @@ async def check_auth_in_browser(plat: str, use_cache: bool = True) -> tuple[bool
         return False, "另一个检测还在跑，请稍候再试"
     try:
         from playwright.async_api import async_playwright
-        prof = _pick_profile("dy" if plat == "douyin" else "ks")
         async with async_playwright() as pw:
-            ctx = await _open_ctx(pw, plat, prof, headless=True)
+            # ★ 用【用户自己的浏览器】（CDP 或他的 profile）→ 登录态天然一致
+            sess = await open_browser(pw, plat, headless=True, prefer_user=True,
+                                      prefer_browser=PREFER_BROWSER.get("kind", ""))
+            ctx = sess.ctx
             try:
-                # ★ 不必加载页面：cookie 就在 profile 里，启动完直接拿。
+                # ★ 不必加载页面：cookie 就在浏览器里，启动完直接拿。
                 #   （原来 goto 首页 + 等 4 秒要 15~30 秒，状态栏转圈半天）
                 ck = {c["name"]: c["value"] for c in await ctx.cookies()}
                 header = "; ".join(f"{k}={v}" for k, v in ck.items() if v)
@@ -451,11 +591,8 @@ async def check_auth_in_browser(plat: str, use_cache: bool = True) -> tuple[bool
                                    "（任务管理器里结束 chrome.exe 再试）")
                 return False, f"浏览器探测异常：{msg[:80]}"
             finally:
-                try:
-                    await ctx.close()
-                except Exception:
-                    pass
-                _release_profile(prof)
+                await sess.close()
+                _release_profile(_pick_profile("dy" if plat == "douyin" else "ks"))
     finally:
         _probe_lock.release()
 
@@ -483,13 +620,18 @@ async def prepare(plat: str, timeout: int = 300, keyword: str = "测试") -> boo
     _release_profile(prof)
 
     # ── ② 没登录 → 弹有头窗口 ──
+    # ★ 用【用户自己的浏览器】：能连上他正在跑的 Chrome 就直接在里面开标签页
+    #   （登录态天然一致，也不会动他的其他标签页）
     prof = _pick_profile("dy" if plat == "douyin" else "ks")
     async with async_playwright() as pw:
-        ctx = await _open_ctx(pw, plat, prof, headless=False)
+        sess = await open_browser(pw, plat, headless=False, prefer_user=True,
+                                   prefer_browser=PREFER_BROWSER.get("kind", ""))
+        ctx = sess.ctx
         try:
-            page = await ctx.new_page()
+            page = await sess.new_page()
             await page.goto(_login_url(plat), wait_until="domcontentloaded", timeout=60000)
             print(f"\n▶ 已打开【{PLAT_NAME[plat]}】网页版：{_login_url(plat)}")
+            print(f"  用的浏览器：{sess.how}")
             if plat == "douyin":
                 print("  点右上角「登录」→ 用手机抖音 App 扫二维码")
             else:
@@ -516,8 +658,5 @@ async def prepare(plat: str, timeout: int = 300, keyword: str = "测试") -> boo
             print(f"  ⏰ 超时（{timeout}s）未完成")
             return False
         finally:
-            try:
-                await ctx.close()
-            except Exception:
-                pass
+            await sess.close()
             _release_profile(prof)

@@ -24,6 +24,7 @@ input:focus{outline:2px solid #1d9e7566;border-color:#1d9e75}
 .btn.sm{padding:6px 13px;font-size:13px}
 .btn.ghost{background:#fff;color:#22221f;border:.5px solid rgba(0,0,0,.18);font-weight:400}
 .btn:disabled{background:#b9c4bf;cursor:not-allowed}
+#settingsModal .btn.ghost{margin:0}
 .chk{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-top:4px}
 .chk label{display:inline-flex;align-items:center;gap:6px;margin:0;font-size:14px;color:#22221f}
 .dirrow{display:flex;gap:8px}
@@ -57,8 +58,13 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
 </head>
 <body>
 <div class="wrap">
-  <h1>DYKSDownLoadPC</h1>
-  <div class="sub">抖音 / 快手 · 关键词批量下载 · 无水印 · 最高质量</div>
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+    <div>
+      <h1>DYKSDownLoadPC</h1>
+      <div class="sub">抖音 / 快手 · 关键词批量下载 · 无水印 · 最高质量</div>
+    </div>
+    <button class="btn ghost" id="openSettings" title="设置">⚙️ 设置</button>
+  </div>
 
   <div class="card">
     <div class="row">
@@ -66,93 +72,17 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
         <label>关键字</label>
         <input type="text" id="kw" placeholder="例如：象棋">
       </div>
-      <div style="max-width:170px">
-        <label>每个平台条数</label>
-        <input type="number" id="cnt" value="10" min="1" max="200">
-      </div>
     </div>
-
-    <div style="margin-top:14px">
-      <label>下载目录</label>
-      <div class="dirrow">
-        <input type="text" id="dir" placeholder="默认 ~/Downloads/DYKS">
-        <button class="btn ghost" id="pick">选择文件夹…</button>
-      </div>
-      <div class="hint">点「开始下载」后自动建子目录：<b>当天日期_关键字</b>，里面再分<b>抖音</b> / <b>快手</b>两个文件夹。<br>
-        下载目录、条数、画面方向、平台选择、排序方式都会<b>自动记住</b>（存在 config.json）。</div>
-    </div>
-
-    <div class="row" style="margin-top:14px">
-      <div>
-        <label>画面方向</label>
-        <div class="chk">
-          <label><input type="radio" name="ori" value="portrait" checked>竖屏</label>
-          <label><input type="radio" name="ori" value="landscape">横屏</label>
-          <label><input type="radio" name="ori" value="both">都要</label>
-        </div>
-      </div>
-      <div>
-        <label>平台</label>
-        <div class="chk">
-          <label><input type="checkbox" id="pdy" checked>抖音</label>
-          <label><input type="checkbox" id="pks" checked>快手</label>
-        </div>
-      </div>
-    </div>
-
-    <div style="margin-top:18px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <div style="margin-top:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <button class="btn" id="start">开始下载</button>
       <span id="phase" style="color:#78786f"></span>
     </div>
+    <div class="hint" style="margin-top:10px">
+      目录、方向、平台、排序等参数都在<b>右上角「⚙️ 设置」</b>里改，会自动记住。
+    </div>
   </div>
 
-  <div class="card">
-    <details id="settingsBox">
-      <summary style="cursor:pointer;font-size:14px;font-weight:500;color:#22221f;
-        list-style:none;user-select:none">⚙️ 设置（排序 / 剪辑参数）</summary>
-      <div class="row" style="margin-top:14px">
-        <div style="max-width:190px">
-          <label>排序方式</label>
-          <select id="order" style="width:100%;padding:9px 10px;border:.5px solid rgba(0,0,0,.18);
-                  border-radius:9px;font:15px inherit;background:#fff">
-            <option value="like">点赞多的</option>
-            <option value="comment">评论多的</option>
-            <option value="newest">最新的</option>
-            <option value="default">默认（不排序）</option>
-          </select>
-        </div>
-        <div style="max-width:170px">
-          <label>单段时长（秒）</label>
-          <input type="number" id="clipDur" value="1.5" min="1" max="1.5" step="0.1">
-        </div>
-        <div>
-          <label>剪辑方向</label>
-          <div class="chk">
-            <label><input type="radio" name="clipori" value="portrait" checked>竖屏 9:16</label>
-            <label><input type="radio" name="clipori" value="landscape">横屏 16:9</label>
-          </div>
-        </div>
-        <div style="max-width:280px">
-          <label>选段方式</label>
-          <div class="chk">
-            <label><input type="radio" name="aipick" value="no" checked>自动（避开黑屏/片头）</label>
-            <label><input type="radio" name="aipick" value="yes">AI 精确选段</label>
-          </div>
-        </div>
-        <div style="max-width:300px">
-          <label>人脸处理</label>
-          <div class="chk">
-            <label><input type="radio" name="faceopt" value="skip" checked>有人脸就跳过（不露脸）</label>
-            <label><input type="radio" name="faceopt" value="keep">保留人脸</label>
-          </div>
-        </div>
-      </div>
-      <div class="hint">
-        排序方式：抖音支持点赞/评论/最新；快手搜索接口不返回评论数，
-        选「评论多的」时会自动按点赞排序并提示。
-      </div>
-    </details>
-  </div>
+  
 
   <div class="card">
     <label style="display:flex;align-items:center;gap:9px;margin-bottom:10px">
@@ -189,7 +119,8 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
     <div class="status" id="status"><span class="st">检测中…</span></div>
     <div class="hint">抖音搜索需要<b>扫码登录</b>，快手需要过<b>滑块验证</b>（不必登录）。
       点「登录」会弹出浏览器，你扫完码 / 拖完滑块关掉窗口即可，状态会自动刷新。<br>
-      <b>下载时不会再自动弹窗</b> —— 没登录的平台会被直接跳过并在这里提示。</div>
+      <b>下载时不会再自动弹窗</b> —— 没登录的平台会被直接跳过并在这里提示。
+      <div id="browserHint" style="margin-top:6px;color:#8a6d1f"></div></div>
   </div>
 
   <div class="card">
@@ -207,6 +138,101 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
   </div>
 </div>
 
+
+<!-- ══ 设置弹窗 ══ -->
+<div id="settingsModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.34);
+     z-index:99;overflow:auto;padding:28px 16px">
+  <div style="max-width:760px;margin:0 auto;background:#fff;border-radius:16px;padding:22px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <b style="font-size:17px">⚙️ 设置</b>
+      <button class="btn ghost sm" id="closeSettings">关闭</button>
+    </div>
+
+    <div style="font-size:13px;color:#1d9e75;font-weight:600;margin:4px 0 10px">⬇ 下载设置</div>
+    <div class="row">
+      <div style="max-width:170px">
+        <label>每个平台条数</label>
+        <input type="number" id="cnt" value="10" min="1" max="200">
+      </div>
+      <div>
+        <label>画面方向</label>
+        <div class="chk">
+          <label><input type="radio" name="ori" value="portrait" checked>竖屏</label>
+          <label><input type="radio" name="ori" value="landscape">横屏</label>
+          <label><input type="radio" name="ori" value="both">都要</label>
+        </div>
+      </div>
+      <div>
+        <label>平台</label>
+        <div class="chk">
+          <label><input type="checkbox" id="pdy" checked>抖音</label>
+          <label><input type="checkbox" id="pks" checked>快手</label>
+        </div>
+      </div>
+      <div style="max-width:190px">
+        <label>下载排序</label>
+        <select id="order" style="width:100%;padding:9px 10px;border:.5px solid rgba(0,0,0,.18);
+                border-radius:9px;font:15px inherit;background:#fff">
+          <option value="like">点赞多的</option>
+          <option value="comment">评论多的</option>
+          <option value="newest">最新的</option>
+          <option value="default">默认（不排序）</option>
+        </select>
+      </div>
+    </div>
+    <div style="margin-top:12px">
+      <label>下载目录</label>
+      <div class="dirrow">
+        <input type="text" id="dir" placeholder="默认 ~/Downloads/DYKS">
+        <button class="btn ghost" id="pick">选择文件夹…</button>
+      </div>
+      <div class="hint">点「开始下载」后自动建子目录：<b>当天日期_关键字</b>，
+        里面再分<b>抖音</b> / <b>快手</b>两个文件夹。</div>
+    </div>
+
+    <div style="font-size:13px;color:#1d9e75;font-weight:600;margin:22px 0 10px">🎬 剪辑设置</div>
+    <div class="row">
+      <div style="max-width:170px">
+        <label>单段时长（秒）</label>
+        <input type="number" id="clipDur" value="1.5" min="1" max="1.5" step="0.1">
+      </div>
+      <div>
+        <label>剪辑方向</label>
+        <div class="chk">
+          <label><input type="radio" name="clipori" value="portrait" checked>竖屏 9:16</label>
+          <label><input type="radio" name="clipori" value="landscape">横屏 16:9</label>
+        </div>
+      </div>
+      <div style="max-width:280px">
+        <label>选段方式</label>
+        <div class="chk">
+          <label><input type="radio" name="aipick" value="no" checked>自动</label>
+          <label><input type="radio" name="aipick" value="yes">AI 精确选段</label>
+        </div>
+      </div>
+      <div style="max-width:300px">
+        <label>人脸处理</label>
+        <div class="chk">
+          <label><input type="radio" name="faceopt" value="skip" checked>有人脸就跳过</label>
+          <label><input type="radio" name="faceopt" value="keep">保留人脸</label>
+        </div>
+      </div>
+    </div>
+    <div style="margin-top:12px">
+      <label>剪辑素材文件夹（留空 = 跟下载目录同一个）</label>
+      <div class="dirrow">
+        <input type="text" id="clipDir" placeholder="默认跟下载目录相同">
+        <button class="btn ghost" id="pickClip">选择文件夹…</button>
+      </div>
+      <div class="hint">也可以单独指定一个文件夹，从里面挑视频来剪。</div>
+    </div>
+    <div class="hint" style="margin-top:14px">
+      所有设置都会<b>自动记住</b>（存在 config.json）。<br>
+      排序说明：抖音支持点赞/评论/最新；快手搜索接口不返回评论数，
+      选「评论多的」会自动按点赞排序并提示。
+    </div>
+  </div>
+</div>
 
 <script>
 var $ = function (id) { return document.getElementById(id); };
@@ -235,6 +261,7 @@ function currentSettings() {
            clip_dur: parseFloat($('clipDur').value) || 1.5,
            ai_pick: (document.querySelector('input[name=aipick]:checked')||{}).value === 'yes',
            clip_dy: $('clipDy').checked, clip_ks: $('clipKs').checked,
+           clip_dir: $('clipDir').value.trim(),
            faceopt: (document.querySelector('input[name=faceopt]:checked')||{}).value || 'skip' };
 }
 function applyConfig(c) {
@@ -266,6 +293,7 @@ function applyConfig(c) {
     var r4 = document.querySelector('input[name=faceopt][value="' + c.faceopt + '"]');
     if (r4) r4.checked = true;
   }
+  if (c.clip_dir !== undefined) $('clipDir').value = c.clip_dir;
   syncClipBox();
 }
 function saveConfig() {
@@ -276,10 +304,9 @@ function saveConfig() {
 /* ---------- 选择文件夹（Windows 原生对话框）---------- */
 /* 后端在后台线程弹窗（置顶），接口立刻返回；这里轮询拿结果。
    ★ 不能同步等待 —— 那样浏览器请求会卡住，看起来就像「点不了」。 */
-$('pick').onclick = function () {
-  var btn = this;
+function pickFolder(targetId, btn) {
   btn.disabled = true; btn.textContent = '弹窗中…';
-  fetch('/api/pickdir?init=' + encodeURIComponent($('dir').value.trim()))
+  fetch('/api/pickdir?init=' + encodeURIComponent($(targetId).value.trim()))
     .then(function (r) { return r.json(); })
     .then(function () {
       var n = 0;
@@ -289,7 +316,7 @@ $('pick').onclick = function () {
           .then(function (j) {
             if (j.dir) {
               clearInterval(iv);
-              $('dir').value = j.dir;
+              $(targetId).value = j.dir;
               saveConfig();
               btn.disabled = false; btn.textContent = '选择文件夹…';
               return;
@@ -305,7 +332,9 @@ $('pick').onclick = function () {
     .catch(function () {
       btn.disabled = false; btn.textContent = '选择文件夹…';
     });
-};
+}
+$('pick').onclick = function () { pickFolder('dir', this); };
+$('pickClip').onclick = function () { pickFolder('clipDir', this); };
 
 function clipPlats() {
   var p = [];
@@ -319,7 +348,8 @@ $('scanClip').onclick = function () {
   var b = this;
   b.disabled = true; b.textContent = '扫描中…';
   fetch('/api/clip/scan', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({dir: $('dir').value.trim(), plats: clipPlats()})})
+    body: JSON.stringify({dir: $('clipDir').value.trim() || $('dir').value.trim(),
+                          plats: clipPlats()})})
     .then(function(r){return r.json();})
     .then(function(j){
       $('clipCount').innerHTML = '📂 扫到 <b>' + (j.douyin||0) + '</b> 个抖音 · <b>'
@@ -339,6 +369,7 @@ $('mkDraft').onclick = function () {
   var avoid = (document.querySelector('input[name=faceopt]:checked')||{}).value === 'skip';
   fetch('/api/clip/make_draft', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({dir: $('dir').value.trim(), plats: clipPlats(),
+                          clip_dir: $('clipDir').value.trim(),
                           orientation: ori, dur: parseFloat($('clipDur').value) || 1.5,
                           ai_pick: ai, avoid_faces: avoid})})
     .then(function(){
@@ -361,6 +392,25 @@ $('mkDraft').onclick = function () {
     .catch(function(){ b.disabled = false; b.textContent = '🎬 生成剪映草稿'; });
 };
 
+/* ══ 设置弹窗 ══ */
+function openSettings() {
+  $('settingsModal').style.display = 'block';
+  saveConfig();
+}
+function closeSettings() {
+  $('settingsModal').style.display = 'none';
+  saveConfig();
+}
+$('openSettings').onclick = openSettings;
+$('closeSettings').onclick = closeSettings;
+$('settingsModal').onclick = function (e) {
+  if (e.target === $('settingsModal')) closeSettings();
+};
+
+/* ★ 告诉后端「用户正在用哪个浏览器」→ 登录时复用同一个浏览器 */
+fetch('/api/browser_info', {method:'POST', headers:{'Content-Type':'application/json'},
+  body: JSON.stringify({ua: navigator.userAgent})}).catch(function(){});
+
 /* 剪映剪辑开关：启用后放开选项区 */
 function syncClipBox() {
   var on = $('clipEnabled').checked;
@@ -369,7 +419,7 @@ function syncClipBox() {
 }
 $('clipEnabled').addEventListener('change', function(){ syncClipBox(); saveConfig(); });
 ['clipDur','clipOrientation'].forEach(function(){});
-document.querySelectorAll('input[name=clipori],input[name=aipick],input[name=faceopt],#clipDy,#clipKs').forEach(function(r){
+document.querySelectorAll('input[name=clipori],input[name=aipick],input[name=faceopt],#clipDy,#clipKs,#clipDir').forEach(function(r){
   r.addEventListener('change', saveConfig);
 });
 $('clipDur').addEventListener('change', saveConfig);
@@ -532,5 +582,6 @@ function scheduleStatus() {
 }
 poll(); loadStatus(true); scheduleStatus();
 </script>
+
 </body>
 </html>

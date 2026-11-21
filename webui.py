@@ -41,6 +41,7 @@ DEFAULT_CONFIG = {
     "clip_orientation": "portrait",
     "clip_dur": 1.5,
     "ai_pick": False,
+    "clip_dir": "",
 }
 
 # 目录选择弹窗的状态（后台弹，前端轮询取结果）
@@ -107,6 +108,7 @@ def save_config(cfg: dict) -> dict:
                              else "portrait"),
         "clip_dur": max(1.0, min(1.5, float(cfg.get("clip_dur") or 1.5))),
         "ai_pick": bool(cfg.get("ai_pick")),
+        "clip_dir": str(cfg.get("clip_dir") or ""),
     }
     try:
         CONFIG_FILE.write_text(json.dumps(out, ensure_ascii=False, indent=2),
@@ -783,7 +785,8 @@ class Handler(BaseHTTPRequestHandler):
                          "platforms": list(plats), "order": order,
                          "clip_enabled": clip_enabled,
                          "clip_orientation": clip_orientation,
-                         "clip_dur": clip_dur, "ai_pick": ai_pick})
+                         "clip_dur": clip_dur, "ai_pick": ai_pick,
+                         "clip_dir": (body.get("clip_dir") or "").strip()})
             th = threading.Thread(target=lambda: asyncio.run(
                 run_job(keyword, dl, count, orient, plats, order,
                         clip_enabled, clip_orientation, clip_dur, ai_pick)),
@@ -816,6 +819,24 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=_do, daemon=True).start()
             self._json({"ok": True})
             return
+        if p == "/api/browser_hint":
+            with _lock:
+                self._json({"hint": auth.BROWSER_HINT,
+                            "prefer": auth.PREFER_BROWSER.get("kind", "")})
+            return
+        if p == "/api/browser_info":
+            # ★ 网页端上报「用户正在用哪个浏览器」→ 后端登录时复用同一个
+            ua = (body.get("ua") or "")[:300]
+            kind = ""
+            low = ua.lower()
+            if "edg/" in low or "edge" in low:
+                kind = "edge"
+            elif "chrome" in low or "chromium" in low:
+                kind = "chrome"
+            auth.PREFER_BROWSER["kind"] = kind
+            auth.PREFER_BROWSER["ua"] = ua
+            self._json({"ok": True, "kind": kind})
+            return
         if p == "/api/clip/scan":
             dl = body.get("dir") or ""
             plats = body.get("plats") or ["douyin", "kuaishou"]
@@ -831,6 +852,8 @@ class Handler(BaseHTTPRequestHandler):
             avoid_faces = body.get("avoid_faces", True)
             ai_pick = bool(body.get("ai_pick"))
             dl = body.get("dir") or ""
+            # ★ 剪辑素材目录：单独指定了就用它，否则跟下载目录相同
+            cd = (body.get("clip_dir") or "").strip() or dl
             res_holder = {}
 
             def _mk():
@@ -838,7 +861,7 @@ class Handler(BaseHTTPRequestHandler):
                     CLIP_BUSY["running"] = True
                 try:
                     res_holder["r"] = asyncio.run(run_clip_job(
-                        Path(dl), plats, orientation, dur, avoid_faces, ai_pick,
+                        Path(cd), plats, orientation, dur, avoid_faces, ai_pick,
                         logline))
                 except Exception as e:
                     # ★ 失败一定要写日志，否则用户只看到「点了没反应」
