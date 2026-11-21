@@ -90,17 +90,9 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
       <span style="font-size:14px;color:#22221f;font-weight:500">剪映自动剪辑</span>
       <span style="color:#8a8a84;font-weight:400;font-size:12px">下载完自动剪成 1~1.5 秒片段并生成剪映草稿</span>
     </label>
-    <div class="row" id="clipBox" style="opacity:.45;pointer-events:none">
-      <div>
-        <label>剪辑来源（下载文件夹里的视频）</label>
-        <div class="chk">
-          <label><input type="checkbox" id="clipDy" checked>抖音</label>
-          <label><input type="checkbox" id="clipKs" checked>快手</label>
-        </div>
-      </div>
-    </div>
     <div class="hint">
-      视频条数 = <b>下载文件夹里实际有多少</b>（不强行凑数）；<br>
+      默认只剪<b>最近一次下载</b>的视频（不会混进别的关键词）；<br>
+      视频条数 = <b>实际有多少</b>（不强行凑数）；<br>
       含真人的片段会被跳过，所以成片条数可能少于原视频数（这是对的）。<br>
       不要配音、不要字幕、片段默认无音频。草稿直接落到剪映草稿目录，打开剪映就能看到。
     </div>
@@ -145,7 +137,6 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
   <div style="max-width:760px;margin:0 auto;background:#fff;border-radius:16px;padding:22px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
       <b style="font-size:17px">⚙️ 设置</b>
-      <button class="btn ghost sm" id="closeSettings">关闭</button>
     </div>
 
     <div style="font-size:13px;color:#1d9e75;font-weight:600;margin:4px 0 10px">⬇ 下载设置</div>
@@ -192,6 +183,13 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
 
     <div style="font-size:13px;color:#1d9e75;font-weight:600;margin:22px 0 10px">🎬 剪辑设置</div>
     <div class="row">
+      <div>
+        <label>剪辑来源</label>
+        <div class="chk">
+          <label><input type="checkbox" id="clipDy" checked>抖音</label>
+          <label><input type="checkbox" id="clipKs" checked>快手</label>
+        </div>
+      </div>
       <div style="max-width:170px">
         <label>单段时长（秒）</label>
         <input type="number" id="clipDur" value="1.5" min="1" max="1.5" step="0.1">
@@ -406,7 +404,6 @@ function closeSettings() {
   $('settingsModal').style.display = 'none';
 }
 $('openSettings').onclick = openSettings;
-$('closeSettings').onclick = closeSettings;
 $('cancelSettings').onclick = function () {
   /* 取消 = 还原成【已保存】的值，再关闭 */
   fetch('/api/config').then(function(r){return r.json();}).then(function(c){

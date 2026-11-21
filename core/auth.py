@@ -407,6 +407,10 @@ def _cdp_url() -> str | None:
     return None
 
 
+# ★ prepare 的【实际结果】——界面直接用这个刷新状态，
+#   不要再走 check_auth_in_browser（会命中 30 秒旧缓存 → 显示还是「未就绪」）
+LAST_PREPARE: dict = {}
+
 # 网页端上报的「用户正在用的浏览器」（前端 navigator.userAgent 解析出来的）
 PREFER_BROWSER: dict = {"kind": "", "ua": ""}
 # 浏览器使用情况（给界面显示提示用）
@@ -645,6 +649,7 @@ async def prepare(plat: str, timeout: int = 300, keyword: str = "测试") -> boo
     ok, why = await check_auth_in_browser(plat)
     if ok:
         print(f"  ✅ {PLAT_NAME[plat]} 已登录，无需重复登录（{why}）")
+        LAST_PREPARE[plat] = (True, why)
         return True
 
     # ── ② 没登录 → 弹有头窗口 ──
@@ -676,23 +681,45 @@ async def prepare(plat: str, timeout: int = 300, keyword: str = "测试") -> boo
             print("  ★ 我在后台盯着接口，一检测到通过就【自动关掉这个窗口】。")
             t0 = time.time()
             last = ""
+            user_closed = False
             while time.time() - t0 < timeout:
                 await asyncio.sleep(2)
                 try:
                     cookies = await ctx.cookies()
                 except Exception:
-                    break                      # 用户自己关了窗口
+                    # ★ 用户自己关了窗口 —— 这【不代表失败】！
+                    #   他可能已经扫完码/拖完滑块才关的。
+                    #   → 跳出循环后重新开浏览器探测一次（绕过缓存）
+                    user_closed = True
+                    break
                 ck = {c["name"]: c["value"] for c in cookies}
                 header = "; ".join(f"{k}={v}" for k, v in ck.items() if v)
                 ok, why = await check_auth(plat, cookie_header=header)
                 if ok:
                     print("  ✅ 检测到登录/验证已通过，正在关闭窗口…")
                     await asyncio.sleep(0.5)
+                    LAST_PREPARE[plat] = (True, why)
                     return True
                 if why != last:
                     last = why
                     print(f"  … 还没通过：{why}")
+            # ★ 用户手动关了窗口 → 【重新探测一次】（绕过 30 秒缓存）
+            #   他多半已经验证成功了，只是我们没看到那一刻
+            if user_closed:
+                print("  窗口已关闭，重新检测一次登录状态…")
+                try:
+                    ok2, why2 = await check_auth_in_browser(plat, use_cache=False)
+                except Exception as e:
+                    ok2, why2 = False, str(e)[:60]
+                if ok2:
+                    print(f"  ✅ 已通过（{why2}）")
+                    LAST_PREPARE[plat] = (True, why2)
+                    return True
+                LAST_PREPARE[plat] = (False, why2)
+                print(f"  ⚠ 还是没过：{why2}")
+                return False
             print(f"  ⏰ 超时（{timeout}s）未完成")
+            LAST_PREPARE[plat] = (False, "超时未完成")
             return False
         finally:
             await sess.close()

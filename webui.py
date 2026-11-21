@@ -50,7 +50,8 @@ PICK_STATE = {"dir": "", "running": False}
 # 任务状态（单任务，够用）
 JOB: dict = {"running": False, "phase": "", "log": [], "items": [],
              "out_root": "", "done": 0, "total": 0, "error": "",
-             "draft_root": "", "draft_id": "", "pending_clips": 0}
+             "draft_root": "", "draft_id": "", "pending_clips": 0,
+             "last_videos": [], "last_keyword": ""}
 _lock = threading.Lock()
 
 # ── 登录/验证状态缓存（避免每次刷新都真发网络请求，把机器打爆）──
@@ -342,6 +343,7 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
     #   串行 + 「够数就走」的优化 ≈ 12 秒开始下载，比并行的 95 秒好得多。
     idx = 0
     done_videos: list[Path] = []
+    failed_plats: set = set()      # 没下到的平台（未登录/没搜到）
     for plat in plats:
         with _lock:
             JOB["phase"] = f"搜索 {PLAT_NAME[plat]}"
@@ -367,6 +369,7 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
             set_item(idx, plat=plat, name="（需要登录/验证）", state="need_auth",
                      pct=0, size=0, wh="")
             idx += 1
+            failed_plats.add(plat)
             continue
         if err is not None:
             logline(f"{PLAT_NAME[plat]} 搜索失败：{str(err)[:120]}", "err")
@@ -380,6 +383,7 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
             set_item(idx, plat=plat, name="（无结果）", state="failed", pct=0,
                      size=0, wh="")
             idx += 1
+            failed_plats.add(plat)
             continue
 
         if orient == "portrait":
@@ -439,8 +443,17 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
             else:
                 logline(f"❌ {it.title[:26]} 失败：{msg}", "err")
 
+    # ★ 记住本次下载了哪些视频（剪辑默认就用这批，不会混进别的关键词）
+    with _lock:
+        JOB["last_videos"] = [str(v) for v in done_videos]
+        JOB["last_keyword"] = keyword
+
     # ── 剪映自动剪辑（可选）──
     if clip_enabled and done_videos:
+        # ★ 说清楚：哪个平台没下到（多半是没登录），它就没参与剪辑
+        for fp in failed_plats:
+            logline(f"  ⚠ {PLAT_NAME[fp]} 没下到视频（多半是没登录/没通过验证），"
+                    f"未参与自动剪辑", "warn")
         try:
             if ai_pick:
                 # ★ AI 模式：只抽帧登记，【不阻塞等 AI】（任务先结束）
@@ -451,7 +464,6 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
                                       clip_orientation, clip_dur, False, logline)
         except Exception as e:
             logline(f"⚠ 剪映剪辑失败：{str(e)[:140]}", "err")
-
     with _lock:
         JOB["running"] = False
         JOB["phase"] = "完成"
@@ -471,11 +483,13 @@ PLAT_DIRNAME = {"douyin": "抖音", "kuaishou": "快手"}
 CLIP_BUSY = {"running": False}
 
 
-def scan_media(dl_dir: Path, plats: list[str]) -> dict:
+def scan_media(dl_dir: Path, plats: list[str], keyword: str = "") -> dict:
     """扫描下载目录，找出各平台子目录下的所有视频。
 
     下载目录结构：<下载目录>/<日期_关键字>/抖音/*.mp4、同级 快手/*.mp4
     ⇒ 递归找名为「抖音」「快手」的目录，把里面的视频都收集起来。
+    ★ keyword 不为空时只收【文件名里含关键词】的视频
+      （否则会把之前下载的别的关键词的视频也混进来）。
     """
     out = {"douyin": [], "kuaishou": [], "roots": []}
     if not dl_dir or not Path(dl_dir).exists():
@@ -492,6 +506,10 @@ def scan_media(dl_dir: Path, plats: list[str]) -> dict:
         plat = next(k for k, v in PLAT_DIRNAME.items() if v == p.name)
         vids = sorted([f for f in p.iterdir()
                        if f.is_file() and f.suffix.lower() in (".mp4", ".mov", ".mkv")])
+        # ★ 按关键词过滤：只保留【本次关键词】的视频
+        #   （下载目录里还有以前别的关键词的视频，不能全混进来）
+        if keyword:
+            vids = [f for f in vids if keyword in f.stem]
         if vids:
             out[plat].extend(vids)
             out["roots"].append(str(p))
@@ -529,42 +547,66 @@ async def prepare_ai_clips(videos: list[Path], keyword: str, out_root: Path,
 
 async def run_clip_job(dl_dir: Path, plats: list[str], orientation: str,
                        dur: float, avoid_faces: bool, ai_pick: bool,
-                       logline) -> dict:
-    """按【下载文件夹里的视频】做剪映剪辑。
+                       logline, check_auth: bool = False) -> dict:
+    """做剪映剪辑。
 
-    ★ 视频条数 = 文件夹里实际有多少（不强行凑数）；
+    ★ 素材来源优先级：
+      ① 【最近一次下载的视频】（最准 —— 不会混进别的关键词）
+      ② 手动指定的剪辑文件夹（按关键词过滤文件名）
+      ③ 下载目录（按关键词过滤）
+    ★ 视频条数 = 实际有多少（不强行凑数）；
       有人脸的片段会被跳过，所以最终可能少于原数。
     """
-    # ★★ 先看各平台登录状态：没登录/没过验证 → 【暂停剪辑】并说清楚，
-    #   别在用户根本没登录的情况下默默去剪（之前就是这么干的）
-    ready = True
-    for k in plats:
-        try:
-            ok, why = await auth.check_auth_in_browser(k)
-        except Exception as e:
-            ok, why = False, str(e)[:60]
-        if not ok:
-            ready = False
-            logline(f"  ⛔ {PLAT_NAME[k]} 还没登录/没通过验证（{why}）"
-                    f"→ 自动剪辑已暂停", "err")
-            logline(f"     请先点上方「{PLAT_NAME[k]}」的「登录」按钮处理完，"
-                    f"再回来生成草稿", "err")
-    if not ready:
-        return {"ok": False, "msg": "有平台未登录，自动剪辑已暂停"}
+    # ★★ 登录状态检查【只在「下载任务里的自动剪辑」时做】——
+    #   剪映剪辑本身是纯本地操作（切文件），不需要登录态。
+    #   而下载任务里，如果某平台没登录就没下到素材，
+    #   那自动剪辑就不该把不相关的视频混进来 → 暂停并说清楚。
+    if check_auth:
+        for k in plats:
+            try:
+                ok, why = await auth.check_auth_in_browser(k)
+            except Exception as e:
+                ok, why = False, str(e)[:60]
+            if not ok:
+                logline(f"  ⛔ {PLAT_NAME[k]} 还没登录/没通过验证（{why}）"
+                        f"→ 自动剪辑已暂停", "err")
+                logline(f"     请先点上方「{PLAT_NAME[k]}」的「登录」按钮处理完，"
+                        f"再重新下载", "err")
+                return {"ok": False, "msg": f"{PLAT_NAME[k]} 未登录，自动剪辑已暂停"}
 
-    media = scan_media(dl_dir, plats)
-    # ★ 只取用户勾选的平台
+    # ★★★ 素材来源：优先用【最近一次下载的视频】——
+    #   下载目录里还躺着以前别的关键词的视频，全扫进来就会
+    #   出现「剪辑时把不相干的画面也放进去了」。
+    with _lock:
+        last_videos = list(JOB.get("last_videos") or [])
+        last_kw = JOB.get("last_keyword") or ""
     videos = []
-    for k in ("douyin", "kuaishou"):
-        if k in plats:
-            videos.extend(media[k])
+    if last_videos:
+        for v in last_videos:
+            vp = Path(v)
+            if not vp.exists():
+                continue
+            plat = "kuaishou" if "快手" in str(vp.parent) else "douyin"
+            if plat in plats:
+                videos.append(vp)
+        logline(f"🎬 用最近一次下载的 {len(videos)} 个视频"
+                f"（关键词：{last_kw or '—'}）")
+    if not videos:
+        media = scan_media(dl_dir, plats, keyword=last_kw)
+        videos = []
+        for k in ("douyin", "kuaishou"):
+            if k in plats:
+                videos.extend(media[k])
+        logline(f"🎬 从文件夹里找到 {len(videos)} 个视频"
+                + (f"（按关键词「{last_kw}」过滤）" if last_kw else ""))
     if not videos:
         return {"ok": False, "msg": "下载目录里没找到视频（先下载一批再来剪）"}
     names = "、".join(PLAT_NAME[p] for p in plats)
-    logline(f"🎬 扫描到 {len(videos)} 个视频（{names}）")
     for k in ("douyin", "kuaishou"):
-        if k in plats and media[k]:
-            logline(f"    {PLAT_NAME[k]}：{len(media[k])} 个")
+        n = sum(1 for v in videos
+                if ("快手" if "快手" in str(Path(v).parent) else "抖音") == PLAT_NAME[k])
+        if k in plats and n:
+            logline(f"    {PLAT_NAME[k]}：{n} 个")
     if not clip_mod_available():
         logline("  ⚠ 没有 ffmpeg / 人脸检测能力，跳过剪辑", "warn")
         return {"ok": False, "msg": "缺少 ffmpeg 或人脸检测能力"}
@@ -843,15 +885,21 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     asyncio.run(auth.prepare(plat))
                 finally:
-                    # ★ 登录/验证刚完成 → 立刻更新状态（秒级）。
-                    #   check_auth_in_browser 有 30 秒缓存，这里直接命中，
-                    #   不用再开一次浏览器（那要好几秒，用户会觉得「没刷新」）。
-                    try:
-                        ok, why = asyncio.run(auth.check_auth_in_browser(plat))
-                    except Exception:
-                        ok, why = False, "状态检测失败"
-                    _set_status(plat, ok, why)
-                    logline(f"✅ {PLAT_NAME[plat]} 状态已更新：{why}")
+                    # ★ 直接用 prepare 的【实际结果】刷新状态。
+                    #   不能再走 check_auth_in_browser —— 它会命中 30 秒旧缓存，
+                    #   明明刚验证通过却还显示「未就绪」（用户抱怨过好几次）。
+                    got = auth.LAST_PREPARE.get(plat)
+                    if got:
+                        _set_status(plat, got[0], got[1])
+                        logline(f"✅ {PLAT_NAME[plat]} 状态已更新：{got[1]}")
+                    else:
+                        try:
+                            ok, why = asyncio.run(
+                                auth.check_auth_in_browser(plat, use_cache=False))
+                        except Exception:
+                            ok, why = False, "状态检测失败"
+                        _set_status(plat, ok, why)
+                        logline(f"✅ {PLAT_NAME[plat]} 状态已更新：{why}")
 
             threading.Thread(target=_do, daemon=True).start()
             self._json({"ok": True})
@@ -899,7 +947,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     res_holder["r"] = asyncio.run(run_clip_job(
                         Path(cd), plats, orientation, dur, avoid_faces, ai_pick,
-                        logline))
+                        logline, check_auth=False))
                 except Exception as e:
                     # ★ 失败一定要写日志，否则用户只看到「点了没反应」
                     logline(f"  ❌ 生成草稿失败：{type(e).__name__}: {str(e)[:150]}", "err")
