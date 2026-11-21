@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import sys
+import subprocess
 import threading
 import time
 import webbrowser
@@ -102,11 +103,31 @@ def _write_log_file(msg: str, level: str = "info") -> None:
 
 
 def open_log_file() -> str:
-    """打开日志文件（用系统默认程序）。"""
+    """打开日志文件（用系统默认程序）。
+
+    ★ os.startfile 在服务线程里可能没效果 → 备选：
+      explorer 选中文件 / notepad 直接打开。
+    """
     p = _log_file_path()
+    if not p.exists():
+        try:
+            p.touch()
+        except Exception:
+            pass
     try:
         os.startfile(str(p))      # Windows 默认程序打开
-        return str(p)
+        return f"已打开：{p}"
+    except Exception as e:
+        pass
+    try:
+        # 退路：用 explorer 定位到文件（至少能看到它）
+        subprocess.Popen(["explorer", "/select,", str(p)])
+        return f"已定位到：{p}"
+    except Exception:
+        pass
+    try:
+        subprocess.Popen(["notepad", str(p)])
+        return f"已用记事本打开：{p}"
     except Exception as e:
         return f"打开失败：{str(e)[:80]}（文件在 {p}）"
 
@@ -411,7 +432,7 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
                 # ★ 多要一些：下载后要筛掉「全程露脸」的，
                 #   所以候选得多拿一些才够凑够 count 条
                 items = await search_mod.search(
-                    plat, keyword, limit=max(count * 3, count + 10))
+                    plat, keyword, limit=max(count * 8, count + 25))
                 err = None
             except auth.AuthExpired as e:
                 items, err = [], e
@@ -469,6 +490,8 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
 
         folder = out_root / PLAT_DIR[plat]
         got_ok = 0                     # 本平台已经下到的合格条数
+        # ★ 人脸/字幕会筛掉不少 → 多拿一批候选来替补
+        picked = picked[:max(count * 6, count + 25)]
         for it in picked:
             if got_ok >= count:
                 break                  # ★ 够数了就停（多下的用来替补）
@@ -480,7 +503,7 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
             tname = it.title or ""
             if not tname or (len(tname) > 14 and tname.replace("_", "").replace(
                     "-", "").isalnum() and not any("\u4e00" <= c <= "\u9fff" for c in tname)):
-                tname = f"{keyword}_{PLAT_NAME[plat]}_{got_ok + 1}"
+                tname = f"{keyword}_{PLAT_NAME[plat]}_{my:02d}"
             set_item(my, plat=plat, name=tname[:60] or it.video_id, wh=wh,
                      size=it.bytes, pct=0, state="downloading")
             with _lock:
@@ -904,8 +927,12 @@ async def make_clip_draft(videos: list[Path], keyword: str, out_root: Path,
 
     logline(f"  · 共 {len(clips)} 个片段 → 装配剪映草稿")
     work = out_root / "_剪映草稿"
+    # ★ 草稿名带时间戳：固定名字会【每次覆盖同一个草稿】，
+    #   剪映草稿列表里就会留下好几份同名草稿，
+    #   用户打开的往往是上一次那个旧的（表现为「只有几个镜头」）。
+    stamp = time.strftime("%m%d_%H%M")
     res = capcut_mod.build_draft(clips, work, orientation, "720p",
-                                 f"{keyword}自动剪辑", log=logline)
+                                 f"{keyword}自动剪辑_{stamp}", log=logline)
     if res.get("ok"):
         logline(f"  ✅ 剪映草稿已生成：{res.get('draft_root')}")
         logline(f"     草稿ID {res.get('draft_id')} · {res.get('shots')} 镜 · "
@@ -942,9 +969,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         p = self.path.split("?")[0]
-        if p == "/api/open_log":
-            self._json({"ok": True, "msg": open_log_file()})
-            return
         if p == "/api/debug_profiles":
             from engine import _profiles_in_use, _profile_busy, _PROFILE_DIR
             info = {}
@@ -1086,6 +1110,9 @@ class Handler(BaseHTTPRequestHandler):
 
             threading.Thread(target=_do, daemon=True).start()
             self._json({"ok": True})
+            return
+        if p == "/api/open_log":
+            self._json({"ok": True, "msg": open_log_file()})
             return
         if p == "/api/browser_hint":
             with _lock:

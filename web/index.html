@@ -224,6 +224,7 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
       <div class="hint">也可以单独指定一个文件夹，从里面挑视频来剪。</div>
     </div>
     <div class="hint" style="margin-top:14px">
+      <div id="logMsg" style="font-size:12px;color:#1d9e75;margin-top:6px"></div>
       所有设置点「<b>保存</b>」后才写入 config.json。<br>
       排序说明：抖音支持点赞/评论/最新；快手搜索接口不返回评论数，
       选「评论多的」会自动按点赞排序并提示。
@@ -354,10 +355,13 @@ $('pick').onclick = function () { pickFolder('dir', this); };
 $('pickClip').onclick = function () { pickFolder('clipDir', this); };
 $('pickLog').onclick = function () { pickFolder('logDir', this); };
 $('openLog').onclick = function () {
+  var el = $('logMsg');
+  el.textContent = '正在打开…';
   fetch('/api/open_log', {method:'POST', headers:{'Content-Type':'application/json'},
     body: '{}'}).then(function(r){return r.json();}).then(function(j){
-      if (j.msg) $('draftInfo').innerHTML = '📄 ' + esc(j.msg);
-    });
+      el.textContent = '📄 ' + (j.msg || '已打开');
+      $('draftInfo').innerHTML = '📄 ' + esc(j.msg || '');
+    }).catch(function(e){ el.textContent = '打开失败：' + e; });
 };
 
 function clipPlats() {
@@ -370,6 +374,7 @@ function clipPlats() {
 /* 生成剪映草稿 */
 $('mkDraft').onclick = function () {
   var b = this;
+  clipGenerating = true;              // ★ 一直转圈到真的完成
   b.disabled = true;
   b.innerHTML = '<span class="spin"></span> 剪辑中…';
   var ori = (document.querySelector('input[name=clipori]:checked')||{}).value || 'portrait';
@@ -389,6 +394,7 @@ $('mkDraft').onclick = function () {
         fetch('/api/state').then(function(r){return r.json();}).then(function(st){
           if (!st.clip_busy) {
             clearInterval(iv);
+            clipGenerating = false;      // ★ 服务端说做完了 → 解除转圈
             b.disabled = false; b.textContent = '🎬 生成剪映草稿';
           } else if (t % 4 === 0) {
             b.innerHTML = '<span class="spin"></span> 剪辑中… ' + Math.round(t / 2) + 's';
@@ -471,6 +477,9 @@ $('clipDur').addEventListener('change', function(){});
 /* ---------- 登录状态 + 手动登录 ---------- */
 /* 正在处理登录的平台（点「登录」后到就绪为止，一直显示「处理中…」） */
 var pendingPlat = null;
+/* ★ 剪映草稿生成中：按钮全程转圈+置灰，直到服务端说完成 */
+var clipGenerating = false;
+var lastDraftRoot = '';
 
 function loadStatus(force) {
   fetch('/api/status' + (force ? '?force=1' : '')).then(r=>r.json()).then(function(j){
@@ -546,14 +555,25 @@ function render(st) {
   }
   $('phase').innerHTML = st.running ? '<span class="spin"></span>' + esc(st.phase||'处理中')
                                    : (esc(st.phase||''));
-  /* 剪映草稿：下载完成后自动点亮「生成剪映草稿」 */
+  /* 剪映草稿：下载完成后自动点亮「生成剪映草稿」；
+     ★ 生成中全程转圈 + 置灰，直到真正完成 */
   var pending = st.pending_clips || 0;
   var ready = st.clip_ready || pending > 0;
   var mb = $('mkDraft');
   if (mb) {
-    mb.disabled = !ready;
-    mb.textContent = pending > 0 ? ('🎬 生成剪映草稿（' + pending + ' 个待选段）')
-                                  : '🎬 生成剪映草稿';
+    if (st.draft_root && st.draft_root !== lastDraftRoot) {
+      lastDraftRoot = st.draft_root;   // 新草稿出来了 → 结束转圈
+      clipGenerating = false;
+    }
+    if (clipGenerating) {
+      mb.disabled = true;
+      mb.innerHTML = '<span class="spin"></span> 剪辑中…';
+    } else {
+      mb.disabled = !ready;
+      mb.textContent = pending > 0
+        ? ('🎬 生成剪映草稿（' + pending + ' 个待选段）')
+        : '🎬 生成剪映草稿';
+    }
   }
   var cc = $('clipCount');
   if (cc && st.clip_out) {
