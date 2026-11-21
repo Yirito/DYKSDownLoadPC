@@ -25,7 +25,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from engine import (UA_DESKTOP, UA_MOBILE, _PROFILE_DIR, _pick_profile,
-                    _release_profile)
+                    _release_profile, acquire_profile)
 
 # 判定「已登录」的特征 cookie
 AUTH_MARK = {
@@ -462,6 +462,13 @@ class BrowserSession:
         self.owned = owned          # owned=True → 关闭时要真的关掉
         self.how = how              # 说明用的哪种方式
         self.profile = profile      # 实际用的 profile 名（释放时要准）
+        self.opened: list = []      # 我们自己开的标签页（CDP 模式只关这些）
+
+    async def new_page(self):
+        """开一个标签页（CDP 模式下会被记下来，关闭时只关我们开的）。"""
+        pg = await self.ctx.new_page()
+        self.opened.append(pg)
+        return pg
 
     async def close(self):
         try:
@@ -479,12 +486,17 @@ class BrowserSession:
 
 async def open_browser(pw, plat: str, headless: bool = True,
                        prefer_user: bool = True,
-                       prefer_browser: str = "") -> BrowserSession:
+                       prefer_browser: str = "",
+                       profile: str = "") -> BrowserSession:
     """开一个浏览器会话。
 
-    ★ prefer_user=True 时优先复用用户自己的浏览器（CDP → 他的 profile）。
+    ★ prefer_user=True 时优先复用用户自己的浏览器（CDP → 已连接就同标签页）。
+    ★ profile：指定就用指定的（登录/探测/搜索必须是【同一个】profile，
+      因为登录态存在主 profile 里）。
     """
-    prof = _pick_profile("dy" if plat == "douyin" else "ks")
+    # ★ profile 由调用方指定就用指定的；没指定才自己分配。
+    #   （登录态存在【主 profile】里，所以登录/探测/搜索必须是同一个！）
+    prof = profile or _pick_profile("dy" if plat == "douyin" else "ks")
     # ① CDP：连到用户正在跑的 Chrome（登录态直接共享）
     if prefer_user:
         cdp = _cdp_url()
@@ -626,26 +638,35 @@ async def prepare(plat: str, timeout: int = 300, keyword: str = "测试") -> boo
       不是「必须搜到结果」—— 已登录但某关键词没结果 ≠ 没登录。
     """
     from playwright.async_api import async_playwright
-    prof = _pick_profile("dy" if plat == "douyin" else "ks")
 
     # ── ① 先快速检查（无头，不打扰用户）──
+    # ★ 这里【不要】先调 _pick_profile —— 那是「分配」，会把主 profile 占走，
+    #   导致探测只能用没登录态的备用 profile（登录窗口秒关的元凶）。
     ok, why = await check_auth_in_browser(plat)
     if ok:
         print(f"  ✅ {PLAT_NAME[plat]} 已登录，无需重复登录（{why}）")
         return True
-    _release_profile(prof)
 
     # ── ② 没登录 → 弹有头窗口 ──
-    # ★ 用【用户自己的浏览器】：能连上他正在跑的 Chrome 就直接在里面开标签页
-    #   （登录态天然一致，也不会动他的其他标签页）
-    prof = _pick_profile("dy" if plat == "douyin" else "ks")
+    # ★ 关键：必须用【主 profile】（登录态存在那儿），
+    #   所以先等它空出来，而不是随便拿个没登录态的备用 profile。
+    base = "dy" if plat == "douyin" else "ks"
+    prof = acquire_profile(base, wait=15)
     async with async_playwright() as pw:
         sess = await open_browser(pw, plat, headless=False, prefer_user=True,
-                                   prefer_browser=PREFER_BROWSER.get("kind", ""))
+                                   prefer_browser=PREFER_BROWSER.get("kind", ""),
+                                   profile=prof)
         ctx = sess.ctx
         try:
             page = await sess.new_page()
-            await page.goto(_login_url(plat), wait_until="domcontentloaded", timeout=60000)
+            try:
+                await page.goto(_login_url(plat), wait_until="domcontentloaded",
+                                timeout=60000)
+            except Exception as ge:
+                # ★ 页面没打开也【不要立刻把窗口关了】—— 让用户看得见窗口，
+                #   自己刷新一下就能继续（否则表现为「弹窗一瞬间就没了」）
+                print(f"  ⚠ 页面加载慢/失败：{str(ge)[:80]}")
+                print("    窗口保留着，你可以在窗口里手动刷新页面。")
             print(f"\n▶ 已打开【{PLAT_NAME[plat]}】网页版：{_login_url(plat)}")
             print(f"  用的浏览器：{sess.how}")
             if plat == "douyin":

@@ -227,9 +227,14 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
       <div class="hint">也可以单独指定一个文件夹，从里面挑视频来剪。</div>
     </div>
     <div class="hint" style="margin-top:14px">
-      所有设置都会<b>自动记住</b>（存在 config.json）。<br>
+      所有设置点「<b>保存</b>」后才写入 config.json。<br>
       排序说明：抖音支持点赞/评论/最新；快手搜索接口不返回评论数，
       选「评论多的」会自动按点赞排序并提示。
+    </div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:18px;
+         padding-top:14px;border-top:.5px solid rgba(0,0,0,.1)">
+      <button class="btn ghost" id="cancelSettings">取消</button>
+      <button class="btn" id="saveSettings">保存</button>
     </div>
   </div>
 </div>
@@ -316,8 +321,7 @@ function pickFolder(targetId, btn) {
           .then(function (j) {
             if (j.dir) {
               clearInterval(iv);
-              $(targetId).value = j.dir;
-              saveConfig();
+              $(targetId).value = j.dir;   // ★ 不自动保存，点「保存」才生效
               btn.disabled = false; btn.textContent = '选择文件夹…';
               return;
             }
@@ -395,16 +399,27 @@ $('mkDraft').onclick = function () {
 /* ══ 设置弹窗 ══ */
 function openSettings() {
   $('settingsModal').style.display = 'block';
-  saveConfig();
 }
 function closeSettings() {
+  /* ★ 关闭【不保存】：改动留在表单里；要生效得点「保存」。
+     点弹窗外的空白处也不会关掉。 */
   $('settingsModal').style.display = 'none';
-  saveConfig();
 }
 $('openSettings').onclick = openSettings;
 $('closeSettings').onclick = closeSettings;
-$('settingsModal').onclick = function (e) {
-  if (e.target === $('settingsModal')) closeSettings();
+$('cancelSettings').onclick = function () {
+  /* 取消 = 还原成【已保存】的值，再关闭 */
+  fetch('/api/config').then(function(r){return r.json();}).then(function(c){
+    applyConfig(c);
+    closeSettings();
+  }).catch(function(){ closeSettings(); });
+};
+$('saveSettings').onclick = function () {
+  saveConfig();          // ★ 只有点「保存」才写 config.json
+  var b = this;
+  b.textContent = '已保存 ✓';
+  setTimeout(function () { b.textContent = '保存'; }, 1200);
+  setTimeout(closeSettings, 350);
 };
 
 /* ★ 告诉后端「用户正在用哪个浏览器」→ 登录时复用同一个浏览器 */
@@ -439,12 +454,13 @@ function syncClipBox() {
   $('clipBox').style.opacity = on ? '1' : '.45';
   $('clipBox').style.pointerEvents = on ? 'auto' : 'none';
 }
-$('clipEnabled').addEventListener('change', function(){ syncClipBox(); saveConfig(); });
+$('clipEnabled').addEventListener('change', function(){ syncClipBox(); });
 ['clipDur','clipOrientation'].forEach(function(){});
+/* ★ 设置项改动【不自动保存】——统一由「保存」按钮写入 config.json */
 document.querySelectorAll('input[name=clipori],input[name=aipick],input[name=faceopt],#clipDy,#clipKs,#clipDir').forEach(function(r){
-  r.addEventListener('change', saveConfig);
+  r.addEventListener('change', function(){ /* 只改界面状态，不落盘 */ });
 });
-$('clipDur').addEventListener('change', saveConfig);
+$('clipDur').addEventListener('change', function(){});
 
 /* ---------- 登录状态 + 手动登录 ---------- */
 /* 正在处理登录的平台（点「登录」后到就绪为止，一直显示「处理中…」） */
