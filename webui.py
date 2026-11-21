@@ -42,6 +42,7 @@ DEFAULT_CONFIG = {
     "clip_dur": 1.5,
     "ai_pick": False,
     "clip_dir": "",
+    "log_dir": "",
 }
 
 # 目录选择弹窗的状态（后台弹，前端轮询取结果）
@@ -72,6 +73,42 @@ def logline(msg: str, level: str = "info") -> None:
         JOB["log"].append({"t": time.strftime("%H:%M:%S"), "msg": msg, "lv": level})
         if len(JOB["log"]) > 500:
             JOB["log"] = JOB["log"][-500:]
+    # ★ 同步写进日志文件（默认在后端根目录，可改）
+    _write_log_file(msg, level)
+
+
+def _log_file_path() -> Path:
+    """日志文件路径：设置里指定的目录 → 否则后端根目录。"""
+    cfg = load_config()
+    d = (cfg.get("log_dir") or "").strip()
+    base = Path(d) if d else Path(__file__).resolve().parent
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        base = Path(__file__).resolve().parent
+    return base / "运行日志.log"
+
+
+def _write_log_file(msg: str, level: str = "info") -> None:
+    """追加一行到日志文件（失败不打扰主流程）。"""
+    try:
+        p = _log_file_path()
+        t = time.strftime("%Y-%m-%d %H:%M:%S")
+        tag = {"err": "错误", "warn": "警告"}.get(level, "信息")
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(f"[{t}] [{tag}] {msg}\n")
+    except Exception:
+        pass
+
+
+def open_log_file() -> str:
+    """打开日志文件（用系统默认程序）。"""
+    p = _log_file_path()
+    try:
+        os.startfile(str(p))      # Windows 默认程序打开
+        return str(p)
+    except Exception as e:
+        return f"打开失败：{str(e)[:80]}（文件在 {p}）"
 
 
 def set_item(idx: int, **kw) -> None:
@@ -112,6 +149,7 @@ def save_config(cfg: dict) -> dict:
         "clip_dur": max(1.0, min(1.5, float(cfg.get("clip_dur") or 1.5))),
         "ai_pick": bool(cfg.get("ai_pick")),
         "clip_dir": str(cfg.get("clip_dir") or ""),
+        "log_dir": str(cfg.get("log_dir") or ""),
     }
     try:
         CONFIG_FILE.write_text(json.dumps(out, ensure_ascii=False, indent=2),
@@ -317,7 +355,8 @@ _search_lock = asyncio.Lock()
 async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
                   plats: tuple[str, ...], order: str = "like",
                   clip_enabled: bool = False, clip_orientation: str = "portrait",
-                  clip_dur: float = 1.5, ai_pick: bool = False) -> None:
+                  clip_dur: float = 1.5, ai_pick: bool = False,
+                  avoid_faces: bool = True) -> None:
     """搜索 + 下载，全程把进度写进 JOB。
 
     ★ 不再自动弹浏览器要求登录 —— 登录由界面上的「登录」按钮手动触发，
@@ -361,6 +400,7 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
           ⇒ 实际时序：搜抖音(6s) → 抖音开下 + 后台搜快手 → 两边同时下
         """
         nonlocal idx
+        import clip as clip_mod
         with _lock:
             JOB["phase"] = f"搜索 {PLAT_NAME[plat]}"
         logline(f"正在搜索 {PLAT_NAME[plat]}：{keyword}")
@@ -368,8 +408,10 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
             try:
                 # ★ limit 别贪多：第一页通常就有 10 条，要太多就得一直
                 #   滚动等分页（搜索慢的大头）。留一点余量给竖屏过滤就够。
+                # ★ 多要一些：下载后要筛掉「全程露脸」的，
+                #   所以候选得多拿一些才够凑够 count 条
                 items = await search_mod.search(
-                    plat, keyword, limit=max(count + 5, count * 2))
+                    plat, keyword, limit=max(count * 3, count + 10))
                 err = None
             except auth.AuthExpired as e:
                 items, err = [], e
@@ -426,18 +468,26 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
                     f"平台里可能真没那么多，或被横竖屏过滤掉了", "warn")
 
         folder = out_root / PLAT_DIR[plat]
+        got_ok = 0                     # 本平台已经下到的合格条数
         for it in picked:
+            if got_ok >= count:
+                break                  # ★ 够数了就停（多下的用来替补）
             async with idx_lock:
                 my = idx
                 idx += 1
             wh = f"{it.width}×{it.height}" if it.width else ""
-            set_item(my, plat=plat, name=it.title[:60] or it.video_id, wh=wh,
+            # ★ 文件名兜底：标题像 video_id（纯字母数字）时用「关键词_平台_序号」
+            tname = it.title or ""
+            if not tname or (len(tname) > 14 and tname.replace("_", "").replace(
+                    "-", "").isalnum() and not any("\u4e00" <= c <= "\u9fff" for c in tname)):
+                tname = f"{keyword}_{PLAT_NAME[plat]}_{got_ok + 1}"
+            set_item(my, plat=plat, name=tname[:60] or it.video_id, wh=wh,
                      size=it.bytes, pct=0, state="downloading")
             with _lock:
                 JOB["total"] += 1
-            dest = unique_path(folder, safe_name(it.title))
+            dest = unique_path(folder, safe_name(tname))
             with _lock:
-                JOB["phase"] = f"下载 {PLAT_NAME[plat]} · {it.title[:24]}"
+                JOB["phase"] = f"下载 {PLAT_NAME[plat]} · {tname[:24]}"
 
             def cb(got, total, _m=my):
                 pct = int(got * 100 / total) if total else 0
@@ -446,9 +496,26 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
             good, msg = await download(plat, it.play_url, dest, on_progress=cb)
             if not good:
                 # ★ 失败重试一次（CDN 偶尔抽风），并写明原因
-                logline(f"⚠ {it.title[:26]} 下载失败（{msg}），重试一次…", "warn")
+                logline(f"⚠ {tname[:26]} 下载失败（{msg}），重试一次…", "warn")
                 await asyncio.sleep(2)
                 good, msg = await download(plat, it.play_url, dest, on_progress=cb)
+            # ★★★ 下载完立刻查人脸：快手搜「带货」出来的几乎全是真人口播，
+            #   整条从头到尾有人 → 剪哪一段都会露脸。
+            #   ⇒ 有脸就【删掉这条】，继续下下一条替补（别等剪辑时才丢）。
+            if good and avoid_faces:
+                try:
+                    has, n = await clip_mod.has_face_in_video(dest)
+                except Exception:
+                    has, n = False, 0
+                if has:
+                    try:
+                        dest.unlink()
+                    except Exception:
+                        pass
+                    set_item(my, state="failed", pct=0, size=0,
+                             path="", note=f"全程露脸，已丢弃（{n} 帧检出）")
+                    logline(f"⚠ {tname[:24]} 全程露脸 → 已丢弃，自动换下一条", "warn")
+                    continue
             real_size = dest.stat().st_size if dest.exists() else 0
             set_item(my, state="done" if good else "failed",
                      pct=100 if good else 0,
@@ -457,6 +524,7 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
             if good:
                 with _lock:
                     JOB["done"] += 1
+                got_ok += 1
                 logline(f"✅ {dest.name}  {msg}")
                 done_videos.append(dest)
             else:
@@ -697,22 +765,49 @@ async def make_clip_draft(videos: list[Path], keyword: str, out_root: Path,
     clips_dir.mkdir(parents=True, exist_ok=True)
     clips: list[dict] = []
     skipped_face = 0
+    skipped_sub = 0
+    # ★ 剪辑顺序：抖音先、快手后（用户要求）
+    videos = sorted(videos, key=lambda v: 1 if "快手" in str(v.parent) else 0)
 
     for i, v in enumerate(videos, 1):
         logline(f"  [{i}/{len(videos)}] 分析画面：{v.name[:30]}")
-        frames = await clip_mod.extract_frames(v, clips_dir / v.stem, max_frames=8)
+        # ★ 抽 14 帧做【全片】人脸排查（不是只看选中的那一帧！）
+        frames = await clip_mod.extract_frames(v, clips_dir / v.stem, max_frames=14)
         if not frames:
             logline(f"      ⚠ 抽不出画面，跳过", "warn")
             continue
         total = clip_mod.probe_duration(v)
+
+        # ★★★ 严格人脸策略：整片里只要有【够多】的帧露脸就跳过这条视频。
+        #   之前只看「选中的那一帧」→ 视频里别处有人脸照样混进草稿。
+        n_face = sum(1 for f in frames if f.faces > 0)
+        face_ratio = n_face / max(1, len(frames))
+        unknown = sum(1 for f in frames if f.faces < 0)
+        if unknown == len(frames):
+            logline(f"      ⚠ 检测不了人脸（缺检测能力），跳过这条", "warn")
+            continue
+        if face_ratio >= 0.3:
+            logline(f"      ⚠ 全片 {n_face}/{len(frames)} 帧露脸，跳过这条", "warn")
+            skipped_face += 1
+            continue
+        if face_ratio > 0:
+            logline(f"      · {n_face}/{len(frames)} 帧露脸 → 只从无人脸帧里选", "warn")
+
+        # ★ 字幕是【烧在画面里】的，剪映里关不掉。
+        #   整条都带字幕 → 这条没法用（用户：「不能去掉字幕就不要」）→ 跳过
+        n_sub = sum(1 for f in frames if clip_mod.has_subtitle(f.path))
+        if n_sub:
+            logline(f"      · {n_sub}/{len(frames)} 帧带字幕 → 优先选无字幕画面，"
+                    f"没有就裁掉底部字幕带", "warn")
+
         # 登记待选段（供外部 AI 读取候选帧并提交选择）
         with _lock:
             CLIP_PENDING[str(v)] = {
                 "video": str(v),
                 "keyword": keyword,
                 "duration": round(total, 2),
-                "frames": [{"path": f.path, "t": f.t, "score": f.score}
-                           for f in frames],
+                "frames": [{"path": f.path, "t": f.t, "score": f.score,
+                            "faces": f.faces} for f in frames],
             }
 
         idx = -1
@@ -737,15 +832,46 @@ async def make_clip_draft(videos: list[Path], keyword: str, out_root: Path,
             logline(f"      ⚠ 全片都有露脸画面，跳过这条（{v.stem[:20]}）", "warn")
             skipped_face += 1
             continue
-        best = max(cand, key=lambda f: f.score)
-        idx = frames.index(best)
-        how = f"选帧 {best.t:.1f}s" + ("（有人脸，已避开）" if best.faces > 0 else "")
+        # ★★ 优先挑【动作强度高】的帧（吃/掰开/切这种吸引人的瞬间），
+        #   信息量次之。两阶段：粗选区段 → 密集采样找动作峰值。
+        peak_t, dense = await clip_mod.find_action_peak(
+            v, clips_dir / v.stem, total=total)
+        strip_sub = 0.0
+        if dense:
+            # ★ 字幕处理优先级：
+            #   ① 优先选【完全没有字幕】的帧 → 什么都不用动
+            #   ② 没有干净帧 → 裁掉底部字幕带（抖音「去字幕」同思路）
+            no_sub = [f for f in dense if not clip_mod.has_subtitle(f.path)]
+            if no_sub:
+                cand = no_sub
+            else:
+                cand = dense
+                band = max((clip_mod.subtitle_band(f.path) for f in dense),
+                           default=0.0)
+                strip_sub = min(0.28, max(0.06, band * 1.6))
+                logline(f"      · 都有字幕 → 裁掉底部 {strip_sub*100:.0f}% 去掉",
+                        "warn")
+            if avoid_faces:
+                noface = [f for f in cand if f.faces <= 0]
+                cand = noface or cand
+            best = max(cand, key=clip_mod._appeal_score)
+            idx = frames.index(best) if best in frames else 0
+            how = (f"动作峰值 {best.t:.1f}s"
+                   f"（动作 {best.motion:.0f}/信息量 {best.score:.0f}）")
+            # 用密集帧的时间点（比粗采样准）
+            best_t = best.t
+        else:
+            best = max(cand, key=clip_mod._appeal_score)
+            best_t = best.t
+            idx = frames.index(best)
+            how = f"选帧 {best.t:.1f}s"
         start, d, ok2 = clip_mod.pick_segment([best], max(0.5, dur - 0.5),
                                               dur, total, avoid_faces=False)
         if not ok2:
             continue
         out = clips_dir / f"{i:02d}_{v.stem[:24]}.mp4"
-        ok, msg = await clip_mod.cut_clip(v, start, d, out, orientation)
+        ok, msg = await clip_mod.cut_clip(v, start, d, out, orientation,
+                                          strip_subtitle=strip_sub)
         if not ok:
             logline(f"      ❌ 裁剪失败：{msg}", "err")
             continue
@@ -756,8 +882,9 @@ async def make_clip_draft(videos: list[Path], keyword: str, out_root: Path,
     if not clips:
         logline("  ⚠ 没有可用片段，未生成草稿", "warn")
         return
-    if skipped_face:
-        logline(f"  · 因含人脸跳过 {skipped_face} 个片段（{len(clips)}/{len(videos)} 个视频入选）")
+    if skipped_face or skipped_sub:
+        logline(f"  · 跳过 {skipped_face} 个露脸 + {skipped_sub} 个全程带字幕的"
+                f"（{len(clips)}/{len(videos)} 个视频入选）")
 
     logline(f"  · 共 {len(clips)} 个片段 → 装配剪映草稿")
     work = out_root / "_剪映草稿"
@@ -799,6 +926,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         p = self.path.split("?")[0]
+        if p == "/api/open_log":
+            self._json({"ok": True, "msg": open_log_file()})
+            return
         if p == "/api/debug_profiles":
             from engine import _profiles_in_use, _profile_busy, _PROFILE_DIR
             info = {}
@@ -887,7 +1017,9 @@ class Handler(BaseHTTPRequestHandler):
             if not keyword:
                 self._json({"ok": False, "msg": "请填关键字"})
                 return
-            dl = Path(body.get("dir") or (Path.cwd() / "downloads"))
+            # ★ 没传目录就用【设置里保存的下载目录】（别默默下载到别处）
+            dl = Path(body.get("dir") or load_config().get("dir")
+                      or (Path.cwd() / "downloads"))
             count = max(1, int(body.get("count") or 10))
             orient = body.get("orientation") or "portrait"
             order = body.get("order") or "like"
@@ -895,16 +1027,15 @@ class Handler(BaseHTTPRequestHandler):
             clip_orientation = body.get("clip_orientation") or "portrait"
             clip_dur = max(1.0, min(1.5, float(body.get("clip_dur") or 1.5)))
             ai_pick = bool(body.get("ai_pick"))
+            avoid_faces = bool(body.get("avoid_faces", True))
             plats = tuple(body.get("platforms") or ("douyin", "kuaishou"))
-            save_config({"dir": str(dl), "count": count, "orientation": orient,
-                         "platforms": list(plats), "order": order,
-                         "clip_enabled": clip_enabled,
-                         "clip_orientation": clip_orientation,
-                         "clip_dur": clip_dur, "ai_pick": ai_pick,
-                         "clip_dir": (body.get("clip_dir") or "").strip()})
+            # ★★★ 不在这里保存配置！
+            #   配置只由【设置弹窗里点「保存」】时写入 ——
+            #   否则每次下载都会改写 config.json（目录/条数被悄悄改掉）。
             th = threading.Thread(target=lambda: asyncio.run(
                 run_job(keyword, dl, count, orient, plats, order,
-                        clip_enabled, clip_orientation, clip_dur, ai_pick)),
+                        clip_enabled, clip_orientation, clip_dur, ai_pick,
+                        avoid_faces)),
                 daemon=True)
             th.start()
             self._json({"ok": True})
@@ -959,7 +1090,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "kind": kind})
             return
         if p == "/api/clip/scan":
-            dl = body.get("dir") or ""
+            dl = body.get("dir") or load_config().get("dir") or ""
             plats = body.get("plats") or ["douyin", "kuaishou"]
             m = scan_media(Path(dl), plats)
             n_dy = len(m["douyin"]) if "douyin" in plats else 0

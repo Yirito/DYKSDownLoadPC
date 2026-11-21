@@ -210,7 +210,7 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
       <div style="max-width:300px">
         <label>人脸处理</label>
         <div class="chk">
-          <label><input type="radio" name="faceopt" value="skip" checked>有人脸就跳过</label>
+          <label><input type="radio" name="faceopt" value="skip" checked>全程露脸就丢弃</label>
           <label><input type="radio" name="faceopt" value="keep">保留人脸</label>
         </div>
       </div>
@@ -227,6 +227,20 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
       所有设置点「<b>保存</b>」后才写入 config.json。<br>
       排序说明：抖音支持点赞/评论/最新；快手搜索接口不返回评论数，
       选「评论多的」会自动按点赞排序并提示。
+    </div>
+    <div style="font-size:13px;color:#1d9e75;font-weight:600;margin:22px 0 10px">📄 日志</div>
+    <div class="row">
+      <div style="flex:3">
+        <label>日志文件夹（留空 = 后端根目录）</label>
+        <div class="dirrow">
+          <input type="text" id="logDir" placeholder="默认：程序所在目录">
+          <button class="btn ghost" id="pickLog">选择文件夹…</button>
+          <button class="btn ghost" id="openLog">打开日志</button>
+        </div>
+      </div>
+    </div>
+    <div class="hint">
+      所有运行日志都会写进「运行日志.log」，方便回头查问题。
     </div>
     <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:18px;
          padding-top:14px;border-top:.5px solid rgba(0,0,0,.1)">
@@ -264,6 +278,7 @@ function currentSettings() {
            ai_pick: (document.querySelector('input[name=aipick]:checked')||{}).value === 'yes',
            clip_dy: $('clipDy').checked, clip_ks: $('clipKs').checked,
            clip_dir: $('clipDir').value.trim(),
+           log_dir: $('logDir').value.trim(),
            faceopt: (document.querySelector('input[name=faceopt]:checked')||{}).value || 'skip' };
 }
 function applyConfig(c) {
@@ -296,6 +311,7 @@ function applyConfig(c) {
     if (r4) r4.checked = true;
   }
   if (c.clip_dir !== undefined) $('clipDir').value = c.clip_dir;
+  if (c.log_dir !== undefined) $('logDir').value = c.log_dir;
   syncClipBox();
 }
 function saveConfig() {
@@ -336,6 +352,13 @@ function pickFolder(targetId, btn) {
 }
 $('pick').onclick = function () { pickFolder('dir', this); };
 $('pickClip').onclick = function () { pickFolder('clipDir', this); };
+$('pickLog').onclick = function () { pickFolder('logDir', this); };
+$('openLog').onclick = function () {
+  fetch('/api/open_log', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: '{}'}).then(function(r){return r.json();}).then(function(j){
+      if (j.msg) $('draftInfo').innerHTML = '📄 ' + esc(j.msg);
+    });
+};
 
 function clipPlats() {
   var p = [];
@@ -347,7 +370,8 @@ function clipPlats() {
 /* 生成剪映草稿 */
 $('mkDraft').onclick = function () {
   var b = this;
-  b.disabled = true; b.textContent = '生成中…';
+  b.disabled = true;
+  b.innerHTML = '<span class="spin"></span> 剪辑中…';
   var ori = (document.querySelector('input[name=clipori]:checked')||{}).value || 'portrait';
   var ai = (document.querySelector('input[name=aipick]:checked')||{}).value === 'yes';
   var avoid = (document.querySelector('input[name=faceopt]:checked')||{}).value === 'skip';
@@ -367,7 +391,7 @@ $('mkDraft').onclick = function () {
             clearInterval(iv);
             b.disabled = false; b.textContent = '🎬 生成剪映草稿';
           } else if (t % 4 === 0) {
-            b.textContent = '🎬 剪辑中… ' + Math.round(t / 2) + 's';
+            b.innerHTML = '<span class="spin"></span> 剪辑中… ' + Math.round(t / 2) + 's';
           }
           if (t > 600) { clearInterval(iv); b.disabled = false; b.textContent = '🎬 生成剪映草稿'; }
         }).catch(function(){});
@@ -574,6 +598,7 @@ $('start').onclick = function () {
     body: JSON.stringify({keyword: $('kw').value, dir: s.dir, count: s.count,
                           orientation: s.orientation, platforms: s.platforms,
                           order: s.order,
+                          avoid_faces: s.faceopt === 'skip',
                           clip_enabled: s.clip_enabled,
                           clip_orientation: s.clip_orientation,
                           clip_dur: s.clip_dur, ai_pick: s.ai_pick})})
