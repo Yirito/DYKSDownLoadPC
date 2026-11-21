@@ -449,18 +449,40 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
             JOB["phase"] = f"搜索 {PLAT_NAME[plat]}"
         logline(f"正在搜索 {PLAT_NAME[plat]}：{keyword}")
         async with _search_lock:
-            try:
-                # ★ limit 别贪多：第一页通常就有 10 条，要太多就得一直
-                #   滚动等分页（搜索慢的大头）。留一点余量给竖屏过滤就够。
-                # ★ 多要一些：下载后要筛掉「全程露脸」的，
-                #   所以候选得多拿一些才够凑够 count 条
-                items = await search_mod.search(
-                    plat, keyword, limit=max(count * 8, count + 25))
-                err = None
-            except auth.AuthExpired as e:
-                items, err = [], e
-            except Exception as e:
-                items, err = [], e
+            # ★★★ 多轮搜索累积候选：平台接口一页只有 20 条（实测快手
+            #   limit 再大也只有 20），靠「场景变体词」多搜几轮把候选池撑起来。
+            #   顺带避开带货内容（带货视频集中在「好不好/推荐/测评」这类词下）。
+            variants = search_mod.expand_keywords(keyword, limit_variants=4)
+            items_all: list = []
+            seen_ids: set = set()
+            err = None
+            for vi, kw in enumerate(variants):
+                need = max(count * 12, count + 40)
+                if len(items_all) >= need:
+                    break
+                try:
+                    got = await search_mod.search(
+                        plat, kw, limit=need - len(items_all))
+                except auth.AuthExpired as e:
+                    err = e
+                    break
+                except Exception as e:
+                    if err is None:
+                        err = e
+                    continue
+                new = 0
+                for it in got:
+                    if it.video_id in seen_ids:
+                        continue
+                    seen_ids.add(it.video_id)
+                    items_all.append(it)
+                    new += 1
+                if vi == 0:
+                    logline(f"  · {PLAT_NAME[plat]} 第一轮「{kw}」命中 {len(got)} 条")
+                if new:
+                    logline(f"  · 补充搜索「{kw}」+{new} 条"
+                            f"（累计 {len(items_all)} 条候选）")
+            items = items_all
         # ★ 不预先探测登录态（探测口径 ≠ 搜索口径，会误判）。
         #   搜索接口自己会告诉我们要不要登录/验证（AuthExpired）。
         if isinstance(err, auth.AuthExpired):
@@ -511,8 +533,9 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
             logline("  ⚠ 快手按点赞排出来的多是带货口播（人脸多），已改为按最新排序",
                     "warn")
         picked = search_mod.sort_items(picked, eff_order)
-        picked = picked[:count]
-        logline(f"{PLAT_NAME[plat]} 命中 {len(items)} 条 → 下载 {len(picked)} 条"
+        # ★ 不要在这里截断到 count —— 后面还要靠多出来的候选
+        #   替补被丢弃（露脸/字幕）的视频，截断了就只剩 count 条可试。
+        logline(f"{PLAT_NAME[plat]} 命中 {len(items)} 条 → 候选 {len(picked)} 条"
                 f"（排序：{ORDER_NAME.get(eff_order, eff_order)}）")
         if len(picked) < count:
             logline(f"  ⚠ {PLAT_NAME[plat]} 只够 {len(picked)} 条（要 {count} 条），"
@@ -520,11 +543,14 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
 
         folder = out_root / PLAT_DIR[plat]
         got_ok = 0                     # 本平台已经下到的合格条数
+        # ★★ 完成率目标：至少要拿到 count 的 60%（用户要求）
+        #   「完成率太低了，如果小于一半的话，就继续下后面的」
+        target_min = max(1, int(count * 0.6))
         # ★ 人脸/字幕会筛掉不少 → 多拿一批候选来替补
-        picked = picked[:max(count * 6, count + 25)]
+        picked = picked[:max(count * 12, count + 40)]
         for it in picked:
             if got_ok >= count:
-                break                  # ★ 够数了就停（多下的用来替补）
+                break                  # 够了就停（多下的用来替补）
             async with idx_lock:
                 my = idx
                 idx += 1

@@ -381,3 +381,20 @@ async def _search_once(plat: str, keyword: str, limit: int,
     if last_err:
         raise last_err
     return []
+
+
+# 关键词扩展：平台搜索接口一页只有 20 条（实测快手 limit 再大也只有 20），
+# 靠「同义词/场景词」多搜几轮，把候选池撑起来；
+# 顺带避开带货内容（带货视频多在「XX 好不好/推荐/测评」这类词下）。
+KEYWORD_VARIANTS = ["特写", "果园", "新鲜", "采摘", "做法", "产地", "怎么吃"]
+
+
+def expand_keywords(keyword: str, limit_variants: int = 4) -> list[str]:
+    """主关键词 + 若干场景变体（用于多轮搜索累积候选）。"""
+    k = (keyword or "").strip()
+    if not k:
+        return []
+    out = [k]
+    for v in KEYWORD_VARIANTS[:limit_variants]:
+        out.append(f"{k} {v}")
+    return out
