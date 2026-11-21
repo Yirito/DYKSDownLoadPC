@@ -326,8 +326,10 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
                 set_item(_m, pct=pct, got=got, total=total)
 
             good, msg = await download(plat, it.play_url, dest, on_progress=cb)
+            real_size = dest.stat().st_size if dest.exists() else 0
             set_item(my, state="done" if good else "failed",
                      pct=100 if good else 0,
+                     size=real_size or it.bytes,     # ★ 用实际落盘大小（搜索响应里没有 size）
                      path=str(dest) if good else "", note=msg)
             if good:
                 with _lock:

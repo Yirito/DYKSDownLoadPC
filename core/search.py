@@ -83,15 +83,27 @@ def _pick_best_douyin(v: dict) -> tuple[str, int, int, int]:
 
 
 def _pick_best_kuaishou(ph: dict) -> tuple[str, int]:
-    best, size = "", 0
-    for pu in (ph.get("photoUrl") or []):
-        u, sz = pu.get("url") or "", pu.get("size") or 0
-        if u and sz > size:
-            best, size = u, sz
-    if not best:
-        best = ph.get("srcNoMark") or ph.get("photo") or ""
-        size = ph.get("photoSize") or 0
-    return best, size
+    """挑快手最高质量的那一档。
+
+    ★ 实测（2026-11）的结构：
+      photo.photoUrls[]     ← 各档不同 CDN，同一档的体积相同
+                              8.42MB/8.42MB、83.76MB/83.76MB… → 取第一个就是最高档
+      photo.photoH265Urls[] ← H265 压缩版，【体积更小】→ 不要用
+      （老结构 photoUrl[]/srcNoMark 保留兼容）
+    """
+    cands = []
+    for pu in (ph.get("photoUrls") or ph.get("photoUrl") or []):
+        u = pu.get("url") or ""
+        if u:
+            cands.append((pu.get("size") or 0, u))
+    for key in ("srcNoMark", "photo"):
+        v = ph.get(key)
+        if isinstance(v, str) and v:
+            cands.append((0, v))
+    if not cands:
+        return "", 0
+    cands.sort(key=lambda x: x[0], reverse=True)
+    return cands[0][1], cands[0][0]
 
 
 async def _search_douyin(ctx, keyword: str, limit: int) -> list[Item]:
@@ -219,12 +231,15 @@ async def _search_kuaishou(ctx, keyword: str, limit: int) -> list[Item]:
             url, size = _pick_best_kuaishou(ph)
             if not url:
                 continue
+            au = ph.get("_author") or ph.get("author") or {}
+            if not isinstance(au, dict):
+                au = {}
             items.append(Item(
                 platform="kuaishou", video_id=pid,
                 desc=(ph.get("caption") or "").strip(),
-                author=str(ph.get("userName") or
-                           (ph.get("author") or {}).get("name") or "").strip(),
-                cover=((ph.get("coverUrls") or [{}])[0] or {}).get("url", ""),
+                author=str(au.get("name") or ph.get("userName") or "").strip(),
+                cover=ph.get("coverUrl") or
+                      (((ph.get("coverUrls") or [{}])[0] or {}).get("url", "")),
                 width=ph.get("width") or 0, height=ph.get("height") or 0,
                 duration=ph.get("duration") or 0,
                 play_url=url, bytes=size,

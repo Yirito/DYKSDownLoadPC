@@ -152,13 +152,45 @@ def _extract_awemes(j) -> list:
 
 
 def _extract_feeds(j) -> list:
-    """从快手的 GraphQL 响应里把 feeds 抠出来（data 可能是 dict 也可能是 list）。"""
+    """从快手的搜索响应里把视频列表抠出来。
+
+    ★ 快手的形状（实测 2026-11）：
+      顶层 {"result":1,"feeds":[{"type":1,"tags":[...],"photo":{...},"author":{...}}]}
+      → 真正的视频对象在 feeds[].photo 里（又是包装！）
+      → author 在【外层】，得一起带出来
+      → 清晰度在 photo.photoUrls[]（各档不同 CDN，体积相同 = 同一档）
+         photo.photoH265Urls[] 是 H265 压缩版，【更小】，不要用
+    """
+    def unwrap(lst):
+        out = []
+        for x in lst:
+            if isinstance(x, dict):
+                ph = x.get("photo")
+                if isinstance(ph, dict):
+                    ph = dict(ph)
+                    a = x.get("author")
+                    if isinstance(a, dict):
+                        ph.setdefault("_author", a)
+                    out.append(ph)
+                    continue
+            out.append(x)
+        return out
+
     def looks(x):
-        return (isinstance(x, list) and x and isinstance(x[0], dict)
-                and ("photoId" in x[0] or "caption" in x[0] or "srcNoMark" in x[0]))
+        if not (isinstance(x, list) and x):
+            return False
+        for i in x[:3]:
+            if not isinstance(i, dict):
+                return False
+            if isinstance(i.get("photo"), dict):
+                continue                      # {"type":1,"photo":{...}} 包装
+            if not any(k in i for k in ("photoId", "id", "caption", "srcNoMark",
+                                        "photoUrls")):
+                return False
+        return True
 
     if looks(j):
-        return j
+        return unwrap(j)
     if not isinstance(j, dict):
         return []
     for path in (("data", "feeds"), ("data", "searchPhoto", "feeds"),
@@ -170,11 +202,11 @@ def _extract_feeds(j) -> list:
             if node is None:
                 break
         if looks(node):
-            return node
+            return unwrap(node)
 
     def scan(x):
         if looks(x):
-            return x
+            return unwrap(x)
         if isinstance(x, dict):
             for v in x.values():
                 r = scan(v)
