@@ -693,12 +693,28 @@ async def run_clip_job(dl_dir: Path, plats: list[str], orientation: str,
         with _lock:
             out_root = JOB.get("out_root") or ""
         scan_dir = Path(out_root) if out_root and Path(out_root).exists() else dl_dir
-        media = scan_media(scan_dir, plats, keyword=last_kw)
+        # ★ 只取【最近一个日期文件夹】—— 下载目录里还躺着以前每次下载的，
+        #   全扫一遍会几十个视频，又慢又容易混进不相关的内容。
+        if scan_dir.name.startswith("20") and "_" in scan_dir.name:
+            latest = scan_dir                      # 已经是某次下载的目录
+        else:
+            cands = [d for d in scan_dir.iterdir()
+                     if d.is_dir() and d.name.startswith("20")]                 if scan_dir.exists() else []
+            latest = max(cands, key=lambda d: d.name) if cands else scan_dir
+            if latest != scan_dir:
+                logline(f"  · 只用最近一次下载的目录：{latest.name}")
+        media = scan_media(latest, plats, keyword=last_kw)
         videos = []
         for k in ("douyin", "kuaishou"):
             if k in plats:
                 videos.extend(media[k])
-        logline(f"🎬 从 {scan_dir} 找到 {len(videos)} 个视频"
+        # ★ 目录里可能堆着历次下载的几十个视频（同一个「今天_关键词」目录）。
+        #   全处理一遍又慢又容易混进不相关的内容 → 只取【最近下载的】一批。
+        if len(videos) > 30:
+            videos.sort(key=lambda p: Path(p).stat().st_mtime, reverse=True)
+            videos = videos[:30]
+            logline(f"  · 目录里视频较多，只处理最近下载的 {len(videos)} 个")
+        logline(f"🎬 从 {latest} 找到 {len(videos)} 个视频"
                 + (f"（按关键词「{last_kw}」过滤）" if last_kw else ""))
     if not videos:
         return {"ok": False, "msg": "下载目录里没找到视频（先下载一批再来剪）"}
