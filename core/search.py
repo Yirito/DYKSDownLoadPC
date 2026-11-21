@@ -35,6 +35,9 @@ class Item:
     play_url: str = ""
     bytes: int = 0
     title: str = ""
+    like_count: int = 0      # 点赞数（排序用）
+    comment_count: int = 0   # 评论数（排序用）
+    create_time: int = 0     # 发布时间戳（秒，排序用）
 
     @property
     def portrait(self) -> bool:
@@ -106,6 +109,35 @@ def _pick_best_kuaishou(ph: dict) -> tuple[str, int]:
     return cands[0][1], cands[0][0]
 
 
+def _ks_comment_count(ph: dict) -> int:
+    """快手的评论数：可能在 photo 里，也可能在外层包装的 comment 里。"""
+    for k in ("commentCount", "comment_count"):
+        v = ph.get(k)
+        if isinstance(v, int):
+            return v
+    c = ph.get("_comment") or ph.get("comment")
+    if isinstance(c, dict):
+        for k in ("count", "commentCount", "total"):
+            v = c.get(k)
+            if isinstance(v, int):
+                return v
+    return 0
+
+
+def sort_items(items: list[Item], order: str = "like") -> list[Item]:
+    """按指定方式排序。
+
+    order: like（点赞多，默认）/ comment（评论多）/ newest（最新）/ default（不排）
+    """
+    if order == "like":
+        return sorted(items, key=lambda x: x.like_count, reverse=True)
+    if order == "comment":
+        return sorted(items, key=lambda x: x.comment_count, reverse=True)
+    if order == "newest":
+        return sorted(items, key=lambda x: x.create_time, reverse=True)
+    return list(items)
+
+
 async def _search_douyin(ctx, keyword: str, limit: int) -> list[Item]:
     items: list[Item] = []
     page = await ctx.new_page()
@@ -173,6 +205,9 @@ async def _search_douyin(ctx, keyword: str, limit: int) -> list[Item]:
                 width=w or (v.get("width") or 0), height=h or (v.get("height") or 0),
                 duration=v.get("duration") or 0,
                 play_url=url, bytes=size,
+                like_count=int((a.get("statistics") or {}).get("digg_count") or 0),
+                comment_count=int((a.get("statistics") or {}).get("comment_count") or 0),
+                create_time=int(a.get("create_time") or 0),
                 title=clean_name(a.get("desc") or "", vid)))
             if len(items) >= limit:
                 break
@@ -243,6 +278,9 @@ async def _search_kuaishou(ctx, keyword: str, limit: int) -> list[Item]:
                 width=ph.get("width") or 0, height=ph.get("height") or 0,
                 duration=ph.get("duration") or 0,
                 play_url=url, bytes=size,
+                like_count=int(ph.get("likeCount") or 0),
+                comment_count=int(_ks_comment_count(ph)),
+                create_time=int((ph.get("timestamp") or 0) // 1000),
                 title=clean_name(ph.get("caption") or "", pid)))
             if len(items) >= limit:
                 break

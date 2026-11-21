@@ -58,9 +58,21 @@ async def download(plat: str, url: str, dest: Path,
                             sys.stdout.write(f"\r    已下载 {human(got)}")
                         sys.stdout.flush()
                 sys.stdout.write("\n")
+                # ★ 必须校验是不是【真的视频】：
+                #   CDN 偶尔会返回几 KB 的错误页/占位图，体积过小但 >1KB，
+                #   混过去就变成「✅ 但 0.0MB」的坏文件。
+                #   判定：前 12 字节里要有 mp4 的 ftyp 标识
                 if got < 1024:
                     tmp.unlink(missing_ok=True)
                     return False, "文件过小，可能返回的是错误页"
+                try:
+                    with open(tmp, "rb") as fp:
+                        head = fp.read(16)
+                except Exception:
+                    head = b""
+                if b"ftyp" not in head:
+                    tmp.unlink(missing_ok=True)
+                    return False, "不是视频文件（CDN 返回了错误页），已丢弃"
                 tmp.replace(dest)
                 return True, f"{human(got)} · {time.time()-t0:.0f}s"
     except Exception as e:

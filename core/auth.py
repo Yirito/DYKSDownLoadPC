@@ -171,6 +171,9 @@ def _extract_feeds(j) -> list:
                     a = x.get("author")
                     if isinstance(a, dict):
                         ph.setdefault("_author", a)
+                    # 评论数可能在外层的 comment 里
+                    if x.get("comment") is not None:
+                        ph.setdefault("_comment", x.get("comment"))
                     out.append(ph)
                     continue
             out.append(x)

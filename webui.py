@@ -36,6 +36,7 @@ DEFAULT_CONFIG = {
     "count": 10,
     "orientation": "portrait",
     "platforms": ["douyin", "kuaishou"],
+    "order": "like",
 }
 
 # 目录选择弹窗的状态（后台弹，前端轮询取结果）
@@ -94,6 +95,7 @@ def save_config(cfg: dict) -> dict:
         "count": int(cfg.get("count") or 10),
         "orientation": cfg.get("orientation") or "portrait",
         "platforms": [p for p in (cfg.get("platforms") or []) if p in PLAT_DIR],
+        "order": cfg.get("order") if cfg.get("order") in ORDER_NAME else "like",
     }
     try:
         CONFIG_FILE.write_text(json.dumps(out, ensure_ascii=False, indent=2),
@@ -252,8 +254,11 @@ def get_status(force: bool = False) -> list:
 
 # ------------------------------------------------------------------ 后台任务
 
+ORDER_NAME = {"like": "点赞多", "comment": "评论多", "newest": "最新", "default": "默认"}
+
+
 async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
-                  plats: tuple[str, ...]) -> None:
+                  plats: tuple[str, ...], order: str = "like") -> None:
     """搜索 + 下载，全程把进度写进 JOB。
 
     ★ 不再自动弹浏览器要求登录 —— 登录由界面上的「登录」按钮手动触发，
@@ -277,7 +282,7 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
             JOB["phase"] = f"搜索 {PLAT_NAME[plat]}"
         logline(f"正在搜索 {PLAT_NAME[plat]}：{keyword}")
         try:
-            items = await search_mod.search(plat, keyword, limit=count * 3)
+            items = await search_mod.search(plat, keyword, limit=count * 5)
         except auth.AuthExpired as e:
             logline(f"{e}", "warn")
             logline(f"请点上方「登录」按钮处理 {PLAT_NAME[plat]}，再重新下载。", "warn")
@@ -305,8 +310,20 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
             picked = [i for i in items if i.width and i.height and i.width > i.height]
         else:
             picked = list(items)
+        # ★ 排序：点赞多（默认）/ 评论多 / 最新 / 不排
+        # 快手搜索接口【不返回评论数】（只有 comment.us_c = 我的评论数），
+        # 所以「评论多」在快手上没法真排序 → 降级成按点赞排，并说明
+        eff_order = order
+        if order == "comment" and plat == "kuaishou":
+            eff_order = "like"
+            logline("  ⚠ 快手搜索接口不返回评论数，已改为按点赞排序", "warn")
+        picked = search_mod.sort_items(picked, eff_order)
         picked = picked[:count]
-        logline(f"{PLAT_NAME[plat]} 命中 {len(items)} 条，选中 {len(picked)} 条")
+        logline(f"{PLAT_NAME[plat]} 命中 {len(items)} 条 → 下载 {len(picked)} 条"
+                f"（排序：{ORDER_NAME.get(eff_order, eff_order)}）")
+        if len(picked) < count:
+            logline(f"  ⚠ {PLAT_NAME[plat]} 只够 {len(picked)} 条（要 {count} 条），"
+                    f"平台里可能真没那么多，或被横竖屏过滤掉了", "warn")
 
         folder = out_root / PLAT_DIR[plat]
         for it in picked:
@@ -439,11 +456,12 @@ class Handler(BaseHTTPRequestHandler):
             dl = Path(body.get("dir") or (Path.cwd() / "downloads"))
             count = max(1, int(body.get("count") or 10))
             orient = body.get("orientation") or "portrait"
+            order = body.get("order") or "like"
             plats = tuple(body.get("platforms") or ("douyin", "kuaishou"))
             save_config({"dir": str(dl), "count": count, "orientation": orient,
-                         "platforms": list(plats)})
+                         "platforms": list(plats), "order": order})
             th = threading.Thread(target=lambda: asyncio.run(
-                run_job(keyword, dl, count, orient, plats)), daemon=True)
+                run_job(keyword, dl, count, orient, plats, order)), daemon=True)
             th.start()
             self._json({"ok": True})
             return

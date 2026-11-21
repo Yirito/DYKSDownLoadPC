@@ -79,7 +79,7 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
         <button class="btn ghost" id="pick">选择文件夹…</button>
       </div>
       <div class="hint">点「开始下载」后自动建子目录：<b>当天日期_关键字</b>，里面再分<b>抖音</b> / <b>快手</b>两个文件夹。<br>
-        下载目录、条数、画面方向、平台选择都会<b>自动记住</b>（存在 config.json）。</div>
+        下载目录、条数、画面方向、平台选择、排序方式都会<b>自动记住</b>（存在 config.json）。</div>
     </div>
 
     <div class="row" style="margin-top:14px">
@@ -97,6 +97,16 @@ td{padding:7px 4px;border-top:.5px solid rgba(0,0,0,.08);vertical-align:middle}
           <label><input type="checkbox" id="pdy" checked>抖音</label>
           <label><input type="checkbox" id="pks" checked>快手</label>
         </div>
+      </div>
+      <div style="max-width:190px">
+        <label>排序方式</label>
+        <select id="order" style="width:100%;padding:9px 10px;border:.5px solid rgba(0,0,0,.18);
+                border-radius:9px;font:15px inherit;background:#fff">
+          <option value="like">点赞多的</option>
+          <option value="comment">评论多的</option>
+          <option value="newest">最新的</option>
+          <option value="default">默认（不排序）</option>
+        </select>
       </div>
     </div>
 
@@ -151,7 +161,7 @@ function currentSettings() {
   if ($('pks').checked) plats.push('kuaishou');
   return { dir: $('dir').value.trim(), count: parseInt($('cnt').value, 10) || 10,
            orientation: (document.querySelector('input[name=ori]:checked')||{}).value || 'portrait',
-           platforms: plats };
+           platforms: plats, order: $('order').value || 'like' };
 }
 function applyConfig(c) {
   if (!c) return;
@@ -165,6 +175,7 @@ function applyConfig(c) {
     $('pdy').checked = c.platforms.indexOf('douyin') >= 0;
     $('pks').checked = c.platforms.indexOf('kuaishou') >= 0;
   }
+  if (c.order) $('order').value = c.order;
 }
 function saveConfig() {
   fetch('/api/save', {method:'POST', headers:{'Content-Type':'application/json'},
@@ -312,10 +323,11 @@ $('start').onclick = function () {
   if (!$('kw').value.trim()) { alert('请填关键字'); return; }
   fetch('/api/start', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({keyword: $('kw').value, dir: s.dir, count: s.count,
-                          orientation: s.orientation, platforms: s.platforms})})
+                          orientation: s.orientation, platforms: s.platforms,
+                          order: s.order})})
   .then(function(r){return r.json();}).then(function(j){ if(!j.ok) alert(j.msg||'启动失败'); });
 };
-['dir','cnt','pdy','pks'].forEach(function(id){
+['dir','cnt','pdy','pks','order'].forEach(function(id){
   $(id).addEventListener('change', saveConfig);
 });
 document.querySelectorAll('input[name=ori]').forEach(function(r){
