@@ -228,14 +228,39 @@ def _fresh_score(path: str) -> dict:
         key = q[:, :, 0] * 64 + q[:, :, 1] * 8 + q[:, :, 2]
         vals, cnts = np.unique(key.ravel(), return_counts=True)
         dominant = float(cnts.max() / key.size)
-        # 综合：饱和度高 + 主色成片（=特写）+ 中心边缘接近 + 细节多
-        score = (sat * 0.32
-                 + dominant * 130.0
-                 + max(0.0, 60.0 - center_edge) * 0.9
-                 + min(30.0, edge * 6.0) * 0.7)
+        # ⑤ ★★ 【暖色像素占比】—— 判断主体是不是「生鲜（橙/红/黄）」
+        #   柿子/柑橘/草莓/苹果 → 色相 0~55°（暖色区）且饱和度够
+        #   风景（蓝天/绿树）→ 色相 90~200°（冷色区）→ 占比低 → 低分
+        #   ★ 逐像素算色相（不用量化色块，量化会偏色相导致判断失效）
+        warm = 0.0
+        try:
+            mx2 = a.max(axis=2)
+            mn2 = a.min(axis=2)
+            sat_px = (mx2 - mn2) / (mx2 + 1e-3)
+            # RGB → 色相（0~360）
+            r_, g_, b_ = a[:, :, 0], a[:, :, 1], a[:, :, 2]
+            d_ = np.maximum.reduce([r_, g_, b_]) - np.minimum.reduce([r_, g_, b_])
+            hue = np.zeros_like(r_)
+            nz = d_ > 1e-3
+            mr = (mx2 == r_) & nz
+            mg = (mx2 == g_) & nz
+            mb = (mx2 == b_) & nz
+            hue[mr] = (60 * ((g_[mr] - b_[mr]) / d_[mr]) + 360) % 360
+            hue[mg] = (60 * ((b_[mg] - r_[mg]) / d_[mg]) + 120) % 360
+            hue[mb] = (60 * ((r_[mb] - g_[mb]) / d_[mb]) + 240) % 360
+            warmmask = ((hue <= 55) | (hue >= 330)) & (sat_px > 0.30) & (mx2 > 60)
+            warm = float(warmmask.mean())
+        except Exception:
+            warm = 0.0
+        # 综合：饱和度高 + 主色成片（=特写）+ 暖色主体（生鲜）+ 中心边缘接近 + 细节多
+        score = (sat * 0.24
+                 + dominant * 90.0
+                 + warm * 150.0                # ★ 暖色像素占比（生鲜主体）权重最高
+                 + max(0.0, 60.0 - center_edge) * 0.7
+                 + min(30.0, edge * 6.0) * 0.5)
         return {"sat": round(sat, 2), "center_edge": round(center_edge, 2),
                 "detail": round(edge, 2), "dominant": round(dominant, 3),
-                "score": round(score, 2)}
+                "warm": round(warm, 3), "score": round(score, 2)}
     except Exception:
         return {"sat": 0.0, "center_edge": 0.0, "detail": 0.0, "score": 0.0}
 

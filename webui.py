@@ -582,6 +582,12 @@ async def run_job(keyword: str, dl_dir: Path, count: int, orient: str,
                 done_videos.append(dest)
             else:
                 logline(f"❌ {it.title[:26]} 失败：{msg}", "err")
+        if got_ok < target_min:
+            logline(f"  ⚠ {PLAT_NAME[plat]} 只下到 {got_ok}/{count} 条"
+                    f"（{int(got_ok*100/max(1,count))}%），候选已用完", "warn")
+        else:
+            logline(f"  · {PLAT_NAME[plat]} 完成 {got_ok}/{count} 条"
+                    f"（{int(got_ok*100/max(1,count))}%）")
 
     # ★ 两个平台并行跑（内部已用 _search_lock 串行化搜索阶段）。
     #   ★ 依次创建 task（而不是一次性 gather）→ asyncio.Lock 是 FIFO 的，
@@ -835,6 +841,7 @@ async def make_clip_draft(videos: list[Path], keyword: str, out_root: Path,
     clips: list[dict] = []
     skipped_face = 0
     skipped_sub = 0
+    skipped_low = 0
     # ★ 剪辑顺序：抖音先、快手后（用户要求）
     # ★★ 同一平台内部【随机打乱】—— 用户原话：
     #   「总会带到同一件货的，万一剪辑一模一样就不好了」
@@ -928,6 +935,21 @@ async def make_clip_draft(videos: list[Path], keyword: str, out_root: Path,
             if avoid_faces:
                 noface = [f for f in cand if f.faces <= 0]
                 cand = noface or cand
+            # ★★★ 生鲜特写【门槛】：不够特写的画面直接不要
+            #   （用户实测：2、3、5、6、10、11、14、15 都不行 —— 不是没主体
+            #     就是有人脸/是风景/字幕太大）
+            #   判据：特写分 ≥ 绝对门槛(120) 且 ≥ 本片最高分的 65%
+            if cand:
+                mx_f = max(f.fresh for f in cand)
+                good = [f for f in cand
+                        if f.fresh >= 120 and f.fresh >= mx_f * 0.65]
+                if good:
+                    cand = good
+                else:
+                    logline(f"      · 没有够特写的画面（最高特写分 "
+                            f"{mx_f:.0f}），换一条", "warn")
+                    skipped_low += 1
+                    continue
             best = max(cand, key=clip_mod._appeal_score)
             idx = frames.index(best) if best in frames else 0
             how = (f"动作峰值 {best.t:.1f}s"
@@ -956,8 +978,9 @@ async def make_clip_draft(videos: list[Path], keyword: str, out_root: Path,
     if not clips:
         logline("  ⚠ 没有可用片段，未生成草稿", "warn")
         return
-    if skipped_face or skipped_sub:
+    if skipped_face or skipped_sub or skipped_low:
         logline(f"  · 跳过 {skipped_face} 个露脸 + {skipped_sub} 个全程带字幕的"
+                f" + {skipped_low} 个没有生鲜特写的"
                 f"（{len(clips)}/{len(videos)} 个视频入选）")
 
     logline(f"  · 共 {len(clips)} 个片段 → 装配剪映草稿")
@@ -974,18 +997,27 @@ async def make_clip_draft(videos: list[Path], keyword: str, out_root: Path,
     #   剪映草稿列表里就会留下好几份同名草稿，
     #   用户打开的往往是上一次那个旧的（表现为「只有几个镜头」）。
     stamp = time.strftime("%m%d_%H%M")
+    draft_name = f"{keyword}自动剪辑_{stamp}"
+    # ★★★ 草稿【实体】直接生成在「日期_关键词」文件夹里 ——
+    #   用户要求：删掉这个文件夹就把草稿一起删干净（不要留在剪映目录里）。
+    #   然后在剪映的草稿目录里建一个【目录联接】指向它 →
+    #   剪映照样能正常打开/编辑，两边是同一份数据。
+    local_drafts = out_root / "剪映草稿"
+    local_drafts.mkdir(parents=True, exist_ok=True)
     res = capcut_mod.build_draft(clips, work, orientation, "720p",
-                                 f"{keyword}自动剪辑_{stamp}", log=logline)
-    # ★ 把草稿在【下载目录】里做一个入口（目录联接）：
-    #   文件实体还在剪映的草稿目录（剪映能正常读写），
-    #   但用户在「日期_关键词」文件夹里也能直接看到/打开这个草稿。
+                                 draft_name, log=logline,
+                                 draft_root=str(local_drafts))
+    # ★ 在剪映草稿目录建入口（联接），剪映才能在自己的目录里看到它
     if res.get("ok") and res.get("draft_root"):
-        link_dir = out_root / f"剪映草稿_{stamp}"
+        jy_root = Path("D:/JianyingPro Drafts")
+        link = jy_root / draft_name
         try:
-            _mk_junction(Path(res["draft_root"]), link_dir)
-            logline(f"  · 草稿入口：{link_dir}")
+            if jy_root.exists():
+                _mk_junction(Path(res["draft_root"]), link)
+                logline(f"  · 剪映草稿目录已同步（联接）：{link}")
         except Exception as e:
-            logline(f"  · （没能建下载目录里的入口：{str(e)[:60]}）", "warn")
+            logline(f"  · （没能在剪映目录建入口：{str(e)[:60]}）", "warn")
+        logline(f"  · 草稿位置：{res['draft_root']}")
     if res.get("ok"):
         logline(f"  ✅ 剪映草稿已生成：{res.get('draft_root')}")
         logline(f"     草稿ID {res.get('draft_id')} · {res.get('shots')} 镜 · "
