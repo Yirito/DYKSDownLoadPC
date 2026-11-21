@@ -121,15 +121,20 @@ def pick_directory(initial: str = "") -> str:
     try:
         ps = ("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;"
               "Add-Type -AssemblyName System.Windows.Forms;"
+              # ★ 这个 Form 只是用来当「置顶父窗体」的，必须【完全不可见】：
+              #   移到屏幕外 + 1x1 像素 + 全透明，用户看不见它，
+              #   但它 TopMost，对话框就会跟着被顶到最前。
               "$f = New-Object System.Windows.Forms.Form;"
               "$f.TopMost = $true;"
               "$f.ShowInTaskbar = $false;"
-              "$f.StartPosition = 'CenterScreen';"
-              "$f.WindowState = 'Normal';"
+              "$f.StartPosition = 'Manual';"
+              # 放在屏幕中心（1x1 全透明 → 看不见），对话框会以它为父窗体居中显示
+              "$wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea;"
+              "$f.Location = New-Object System.Drawing.Point("
+              "  [int]($wa.Width/2), [int]($wa.Height/2));"
+              "$f.Size = New-Object System.Drawing.Size(1,1);"
+              "$f.Opacity = 0;"
               "$f.Show();"
-              # ★ 三连：置顶 + 激活 + 置前
-              #   SendKeys '%' 是 Windows 的老技巧：模拟按一下 Alt，
-              #   释放「前台窗口锁」，否则后面的窗口抢不到焦点（会弹到后台看不见）
               "$f.Activate();"
               "$f.BringToFront();"
               "[System.Windows.Forms.SendKeys]::SendWait('%');"

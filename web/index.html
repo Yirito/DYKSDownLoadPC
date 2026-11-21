@@ -192,13 +192,9 @@ $('pick').onclick = function () {
               btn.disabled = false; btn.textContent = '选择文件夹…';
               return;
             }
-            if (!j.running) {          // 弹窗被取消 / 没弹出来
+            if (!j.running) {          // 弹窗被取消
               clearInterval(iv);
               btn.disabled = false; btn.textContent = '选择文件夹…';
-              if (!j.dir) {
-                alert('没选到目录（弹窗被取消，或服务没有交互桌面）。\n'
-                    + '可以直接把路径粘到上面的输入框里，一样能用。');
-              }
             }
           });
         if (n > 120) { clearInterval(iv); btn.disabled = false; btn.textContent = '选择文件夹…'; }
